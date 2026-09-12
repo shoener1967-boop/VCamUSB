@@ -1,0 +1,9 @@
+Package: com.shosh.vcamusb
+Name: VCamUSB
+Version: 0.1.0
+Architecture: iphoneos-arm64 iphoneos-arm64e
+Description: Virtual camera for USB streaming - open source, no license, no login. Streams H.264 from PC server into the camera feed (mediaserverd). Works on iOS 16 (Dopamine2-roothide) and iOS 18 (Relaxin).
+Maintainer: shosh
+Author: shosh
+Section: Tweaks
+Depends: mobilesubstrate, firmware (>= 15.0)
