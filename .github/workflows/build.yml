@@ -14,7 +14,7 @@ jobs:
       - name: Setup Theos
         uses: waruhachi/theos-action@v2.4.6
         with:
-          theos-src: 'theos/theos'
+          theos-src: 'roothide/theos'
           theos-branch: 'master'
           sdks-src: 'theos/sdks'
           sdks-branch: 'master'
