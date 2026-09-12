@@ -11,26 +11,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Theos (roothide fork)
-        run: |
-          export THEOS=/tmp/theos
-          mkdir -p $THEOS
-          curl -fsSL https://raw.githubusercontent.com/roothide/theos/master/bin/install-theos > install-theos.sh
-          bash install-theos.sh
-          # Theos-SDK
-          mkdir -p $THEOS/sdks
-          curl -L https://github.com/theos/sdks/releases/latest/download/iPhoneOS16.5.sdk.tar.xz -o $THEOS/sdks/iPhoneOS16.5.sdk.tar.xz
-          tar -xf $THEOS/sdks/iPhoneOS16.5.sdk.tar.xz -C $THEOS/sdks
-          rm $THEOS/sdks/iPhoneOS16.5.sdk.tar.xz
+      - name: Setup Theos
+        uses: waruhachi/theos-action@v2.4.6
+        with:
+          theos-src: 'theos/theos'
+          theos-branch: 'master'
+          sdks-src: 'theos/sdks'
+          sdks-branch: 'master'
+          libgcuniversal: false
+          altlist: false
 
-      - name: Install ldid
-        run: |
-          brew install ldid dpkg xz 2>/dev/null || brew install ldid
-
-      - name: Build VCamUSB
+      - name: Build VCamUSB (roothide)
         working-directory: tweak
         run: |
-          export THEOS=/tmp/theos
           make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
 
       - name: Upload .deb
