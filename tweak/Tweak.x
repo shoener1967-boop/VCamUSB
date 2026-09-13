@@ -216,6 +216,23 @@ static void wsServerThread(void) {
     }
 }
 
+// Datei-Logging für Diagnose (SpringBoard NSLog ist oft gefiltert)
+static void vlog(NSString *msg) {
+    NSLog(@"%@", msg);
+    @autoreleasepool {
+        NSString *path = @"/var/mobile/Documents/vcam.log";
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+        if (!fh) {
+            [@"" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            fh = [NSFileHandle fileHandleForWritingAtPath:path];
+        }
+        [fh seekToEndOfFile];
+        NSString *line = [NSString stringWithFormat:@"%@ %@\n", [NSDate date], msg];
+        [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+        [fh closeFile];
+    }
+}
+
 // ---------------------------------------------------------------- Floating Circle
 // Pass-through-Window: fängt Touches nur auf echten Controls ab, Rest geht durch.
 @interface VCamWindow : UIWindow
@@ -333,23 +350,6 @@ static void wsServerThread(void) {
     }
 }
 @end
-
-// Datei-Logging für Diagnose (SpringBoard NSLog ist oft gefiltert)
-static void vlog(NSString *msg) {
-    NSLog(@"%@", msg);
-    @autoreleasepool {
-        NSString *path = @"/var/mobile/Documents/vcam.log";
-        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
-        if (!fh) {
-            [@"" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
-            fh = [NSFileHandle fileHandleForWritingAtPath:path];
-        }
-        [fh seekToEndOfFile];
-        NSString *line = [NSString stringWithFormat:@"%@ %@\n", [NSDate date], msg];
-        [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
-        [fh closeFile];
-    }
-}
 
 static VCamWindow *g_floatWindow = nil;
 static VCamFloatVC *g_floatVC = nil;
