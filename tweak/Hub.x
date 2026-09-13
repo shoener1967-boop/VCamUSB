@@ -300,6 +300,62 @@ static void ShowOverlayIfUnlocked(void) {
     });
 }
 
+// ---------------------------------------------------------------- Banner-Target
+@interface VCamBannerTarget : NSObject
+- (void)buttonTapped:(UIButton *)btn;
+- (void)pan:(UIPanGestureRecognizer *)pan;
+@end
+@implementation VCamBannerTarget {
+    CGPoint _panStart;
+}
+- (void)buttonTapped:(UIButton *)btn {
+    L("Button getippt — Panel togglen");
+    VCamOverlayWindow *w = (VCamOverlayWindow *)g_overlayWindow;
+    if (![w isKindOfClass:[VCamOverlayWindow class]]) return;
+
+    UIView *panel = w.interactivePanel;
+    if (panel && !panel.hidden) {
+        panel.hidden = YES;   // Panel schließen
+        return;
+    }
+    if (!panel) {
+        // Info-Panel einmalig erstellen
+        panel = [[UIView alloc] initWithFrame:CGRectMake(16, 70, 280, 90)];
+        panel.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.95];
+        panel.layer.cornerRadius = 14;
+        panel.layer.borderWidth = 1.0;
+        panel.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.25].CGColor;
+
+        UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(14, 10, 252, 30)];
+        lbl.text = @"VCamUSB aktiv";
+        lbl.textColor = [UIColor whiteColor];
+        lbl.font = [UIFont boldSystemFontOfSize:16];
+        [panel addSubview:lbl];
+
+        UILabel *sub = [[UILabel alloc] initWithFrame:CGRectMake(14, 42, 252, 40)];
+        sub.text = [NSString stringWithFormat:@"Clients: %d\nWebSocket 127.0.0.1:%d", g_clientCount, WS_PORT];
+        sub.textColor = [UIColor colorWithWhite:0.75 alpha:1.0];
+        sub.font = [UIFont systemFontOfSize:12];
+        sub.numberOfLines = 2;
+        [panel addSubview:sub];
+
+        [w.rootViewController.view addSubview:panel];
+        w.interactivePanel = panel;
+    }
+    panel.hidden = NO;
+}
+- (void)pan:(UIPanGestureRecognizer *)pan {
+    UIView *v = pan.view;
+    if (pan.state == UIGestureRecognizerStateBegan) {
+        _panStart = v.center;
+    } else if (pan.state == UIGestureRecognizerStateChanged) {
+        CGPoint t = [pan translationInView:g_overlayWindow];
+        v.center = CGPointMake(_panStart.x + t.x, _panStart.y + t.y);
+    }
+}
+@end
+static VCamBannerTarget *g_bannerTarget = nil;
+
 static void showOverlay(void) {
     g_overlayCalls++;
     if (g_overlayWindow != nil) return;   // idempotent
@@ -345,6 +401,8 @@ static void showOverlay(void) {
     g_buttonContainer.backgroundColor = [UIColor clearColor];
     g_buttonContainer.userInteractionEnabled = YES;
 
+    g_bannerTarget = [[VCamBannerTarget alloc] init];
+
     UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
     button.frame = g_buttonContainer.bounds;
     button.backgroundColor = [UIColor colorWithRed:0.16 green:0.78 blue:0.34 alpha:0.95];
@@ -352,7 +410,14 @@ static void showOverlay(void) {
     button.layer.borderWidth = 3.0;
     button.layer.borderColor = [UIColor whiteColor].CGColor;
     button.userInteractionEnabled = YES;
+    [button addTarget:g_bannerTarget action:@selector(buttonTapped:)
+        forControlEvents:UIControlEventTouchUpInside];
     [g_buttonContainer addSubview:button];
+
+    // Drag-Geste auf dem Container (Pan verschiebt den Button)
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
+        initWithTarget:g_bannerTarget action:@selector(pan:)];
+    [g_buttonContainer addGestureRecognizer:pan];
 
     [root.view addSubview:g_buttonContainer];
     win.rootViewController = root;
