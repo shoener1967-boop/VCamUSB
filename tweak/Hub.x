@@ -243,9 +243,9 @@ static void bannerSetup(void) {
 
     g_bannerTarget = [[VCamBannerTarget alloc] init];
 
-    // Eigene UIWindow — unabhängig vom SpringBoard-Window, hoher Level
+    // Eigene UIWindow — unabhängig vom SpringBoard-Window, sehr hoher Level
     g_bannerWindow = [[UIWindow alloc] initWithFrame:screen];
-    g_bannerWindow.windowLevel = UIWindowLevelAlert + 0.5;
+    g_bannerWindow.windowLevel = UIWindowLevelStatusBar + 100.0;
     g_bannerWindow.backgroundColor = [UIColor clearColor];
 
     UIViewController *root = [[UIViewController alloc] init];
@@ -296,6 +296,10 @@ static void bannerSetup(void) {
 
     bannerUpdateStatus();
     L("Banner erstellt");
+
+    // Diagnose-Marker schreiben (sichtbar via /tmp)
+    NSString *m = [NSString stringWithFormat:@"banner created pid=%d\n", getpid()];
+    [m writeToFile:@"/tmp/vcam_banner.txt" atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
 
 // ---------------------------------------------------------------- Entry
@@ -305,8 +309,9 @@ static void vcamhub_init(void) {
     L("injiziert in %@ (pid=%d)", proc, getpid());
     if (![proc isEqualToString:@"SpringBoard"]) return;
 
-    // Banner auf dem Main-Thread (UIKit!)
-    dispatch_async(dispatch_get_main_queue(), ^{
+    // Banner verzögert starten (SpringBoard braucht einen Moment zum Hochfahren)
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
         bannerSetup();
     });
 
