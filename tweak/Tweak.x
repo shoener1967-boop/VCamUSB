@@ -265,24 +265,43 @@ static void wsServerThread(void) {
 }
 @end
 
+// Datei-Logging für Diagnose (SpringBoard NSLog ist oft gefiltert)
+static void vlog(NSString *msg) {
+    NSLog(@"%@", msg);
+    @autoreleasepool {
+        NSString *path = @"/var/mobile/Documents/vcam.log";
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+        if (!fh) {
+            [@"" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            fh = [NSFileHandle fileHandleForWritingAtPath:path];
+        }
+        [fh seekToEndOfFile];
+        NSString *line = [NSString stringWithFormat:@"%@ %@\n", [NSDate date], msg];
+        [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+        [fh closeFile];
+    }
+}
+
 static void setupFloatingCircle(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
+        vlog(@"[VCamUSB] setupFloatingCircle start");
         CGRect screen = [UIScreen mainScreen].bounds;
         UIWindow *win = [[UIWindow alloc] initWithFrame:CGRectMake(screen.size.width - 70, 200, 60, 60)];
         win.windowLevel = UIWindowLevelAlert + 10;
         win.backgroundColor = [UIColor clearColor];
         VCamFloatVC *vc = [VCamFloatVC new];
         win.rootViewController = vc;
-        [win makeKeyAndVisible];
-        NSLog(@"[VCamUSB] Floating-Circle angezeigt");
-        // Fenster global halten (statisch im VC referenzieren)
+        win.hidden = NO;
+        // Key-Window-Status NICHT klauen (macht SpringBoard-Probleme), nur zeigen
+        vlog(@"[VCamUSB] Window created, hidden=NO, level=%f", win.windowLevel);
         objc_setAssociatedObject(vc, "vcam_win", win, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        vlog(@"[VCamUSB] Floating-Circle sollte sichtbar sein");
     });
 }
 
 %ctor {
     NSString *proc = [[NSProcessInfo processInfo] processName];
-    NSLog(@"[VCamUSB] injiziert in %@", proc);
+    vlog([NSString stringWithFormat:@"[VCamUSB] injiziert in %@", proc]);
 
     if (![proc isEqualToString:@"SpringBoard"]) return;
 
@@ -299,6 +318,9 @@ static void setupFloatingCircle(void) {
             usleep(2000);
         }
     });
-    setupFloatingCircle();
-    NSLog(@"[VCamUSB] Phase-2 geladen (SpringBoard only)");
+    // UI nach 5 Sekunden Verzögerung zeigen (SpringBoard muss erst voll starten)
+    vlog(@"[VCamUSB] %ctor fertig, UI kommt in 5s");
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        setupFloatingCircle();
+    });
 }
