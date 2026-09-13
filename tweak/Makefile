@@ -3,7 +3,8 @@
 #   VCamInject-> mediaserverd (WS-Client + Decode + FigCapture-Frame-Swap)
 #   VCamProbe -> minimaler Lade-/Diagnose-Canary (beide Prozesse)
 #
-# Build:  make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
+# Build:  make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+TARGET := iphone:clang:latest:13.0
 TWEAK_NAME := VCamHub VCamInject VCamProbe
 
 # ---- Hub: kein Substrate (constructor + Notification-Observer), UIKit für UIWindow
