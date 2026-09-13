@@ -110,9 +110,14 @@ static void pumpDecoder(void) {
         CMBlockBufferRef bb = NULL;
         CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault, NULL, block.length,
             kCFAllocatorDefault, NULL, 0, block.length, 0, &bb);
+        if (!bb) return;
         char *dst = NULL;
         size_t lenAtOffset = 0, totalLen = 0;
-        CMBlockBufferGetDataPointer(bb, 0, &lenAtOffset, &totalLen, &dst);
+        OSStatus dpst = CMBlockBufferGetDataPointer(bb, 0, &lenAtOffset, &totalLen, &dst);
+        if (dpst != kCMBlockBufferNoErr || !dst || lenAtOffset < block.length) {
+            CFRelease(bb);
+            return;
+        }
         memcpy(dst, block.bytes, block.length);
         CMSampleBufferRef sb = NULL;
         CMSampleBufferCreate(kCFAllocatorDefault, bb, true, NULL, NULL, g_fmtDesc, 1, 0, NULL, 0, NULL, &sb);
