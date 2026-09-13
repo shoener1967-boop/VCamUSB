@@ -14,6 +14,7 @@
 #import <arpa/inet.h>
 #import <CommonCrypto/CommonDigest.h>
 #import <os/log.h>
+#import <pthread.h>
 
 #define WS_PORT 8767
 #define MAX_PENDING (16 * 1024 * 1024)
