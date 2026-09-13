@@ -1,14 +1,9 @@
-// VCamHub — WS-Server + Fan-out in SpringBoard
+// VCamHub — WS-Server + Fan-out in SpringBoard (roothide-sicher, ohne Substrate)
 //
-// SpringBoard darf bind() (Sandbox erlaubt es — bereits mehrfach bewiesen).
-// Der Hub nimmt den PC-Feed (usbmuxd-Tunnel) auf Port 8767 entgegen und
-// verteilt jede Binary-Message an alle ANDEREN Clients (Fan-out) — d.h.
-// an VCamInject in mediaserverd, das sich per Loopback verbindet.
-//
-// Kein Decode hier, kein UI-Hook, kein Crash-Potenzial: nur Sockets.
+// KEIN %hook, KEIN %ctor — nur reine POSIX + Foundation + constructor-Attribut.
+// Das umgeht mögliche ElleKit/Substrate-Kompatibilitätsprobleme komplett.
 
 #import <Foundation/Foundation.h>
-#import <substrate.h>
 #import <sys/socket.h>
 #import <netinet/in.h>
 #import <arpa/inet.h>
@@ -24,7 +19,6 @@ static os_log_t LOG = NULL;
     os_log(LOG, "%s: " FMT, __func__, ##__VA_ARGS__); } while (0)
 
 // ---------------------------------------------------------------- Client-Liste
-// Simpel & lockfrei genug: ein Mutex, Array von fds.
 static int g_clients[8] = { -1, -1, -1, -1, -1, -1, -1, -1 };
 static pthread_mutex_t g_cliMutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -49,7 +43,6 @@ static void hubBroadcastExcept(int fromFd, const uint8_t *data, size_t len) {
     for (int i = 0; i < 8; i++) {
         int fd = g_clients[i];
         if (fd != -1 && fd != fromFd) {
-            // Frame: FIN=1, Opcode=binary, kein Mask, Länge
             uint8_t hdr[10];
             size_t hl = 2;
             hdr[0] = 0x82;
@@ -80,7 +73,6 @@ static NSString *wsAcceptKey(NSString *key) {
     return [[NSData dataWithBytes:digest length:CC_SHA1_DIGEST_LENGTH] base64EncodedStringWithOptions:0];
 }
 
-// ---------------------------------------------------------------- Client-Thread
 static void *hubClientThread(void *arg) {
     int fd = (int)(intptr_t)arg;
     @autoreleasepool {
@@ -128,7 +120,7 @@ static void *hubClientThread(void *arg) {
                     if (got < plen) { free(payload); break; }
                     if (masked) for (uint64_t i = 0; i < plen; i++) payload[i] ^= mask[i & 3];
                     if (opcode == 0x8) { free(payload); break; }
-                    if (opcode == 0x9) { // ping -> pong
+                    if (opcode == 0x9) {
                         uint8_t pong_hdr[2] = {0x8A, (uint8_t)(plen & 0x7f)};
                         send(fd, pong_hdr, 2, 0);
                         if (plen > 0) send(fd, payload, (int)plen, 0);
@@ -136,7 +128,6 @@ static void *hubClientThread(void *arg) {
                         continue;
                     }
                     if (opcode == 0x2 || opcode == 0x1) {
-                        // Binary/Text an alle anderen weiterreichen (Fan-out)
                         hubBroadcastExcept(fd, payload, (size_t)plen);
                         free(payload);
                         continue;
@@ -144,7 +135,6 @@ static void *hubClientThread(void *arg) {
                     free(payload);
                 }
                 hubRemoveClient(fd);
-                L("Client getrennt (fd=%d)", fd);
             }
         }
         free(buf);
@@ -153,7 +143,6 @@ static void *hubClientThread(void *arg) {
     return NULL;
 }
 
-// ---------------------------------------------------------------- Server
 static void hubServerThread(void) {
     int srv = socket(AF_INET, SOCK_STREAM, 0);
     if (srv < 0) { L("socket fail: %s", strerror(errno)); return; }
@@ -182,12 +171,11 @@ static void hubServerThread(void) {
     }
 }
 
-// ---------------------------------------------------------------- ctor
-%ctor {
+// ---------------------------------------------------------------- Entry (kein Substrate!)
+__attribute__((constructor))
+static void vcamhub_init(void) {
     NSString *proc = [[NSProcessInfo processInfo] processName];
     L("injiziert in %@ (pid=%d)", proc, getpid());
-    // Marker: an MEHREREN Orten schreiben (roothide redirectet Pfade für
-    // Jailbreak-Prozesse — wir wissen nicht, wo /var/mobile wirklich liegt)
     NSString *marker = [NSString stringWithFormat:@"hub loaded proc=%@ pid=%d\n", proc, getpid()];
     [marker writeToFile:@"/var/mobile/Documents/vcamhub_loaded.txt" atomically:YES encoding:NSUTF8StringEncoding error:nil];
     [marker writeToFile:@"/tmp/vcamhub_loaded.txt" atomically:YES encoding:NSUTF8StringEncoding error:nil];

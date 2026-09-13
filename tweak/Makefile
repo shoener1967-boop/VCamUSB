@@ -11,7 +11,6 @@ TWEAK_NAME := VCamHub VCamInject
 
 VCamHub_FILES := Hub.x
 VCamHub_CFLAGS := -fobjc-arc -Wno-unused-variable
-VCamHub_LIBRARIES := substrate
 
 VCamInject_FILES := Inject.x
 VCamInject_CFLAGS := -fobjc-arc -Wno-unused-variable
