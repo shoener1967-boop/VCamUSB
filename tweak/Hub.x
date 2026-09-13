@@ -238,6 +238,25 @@ static UIWindowScene *ActiveScene(void) {
     return nil;
 }
 
+// ---------------------------------------------------------------- Pass-Through View
+// Fängt Touches NUR im Button-Bereich, leitet alles andere durch (Passcode etc.)
+@interface VCamPassView : UIView
+@property (nonatomic, strong) UIView *interactiveArea;
+@end
+@implementation VCamPassView
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    if (hit == self) {
+        if (self.interactiveArea &&
+            CGRectContainsPoint(self.interactiveArea.frame, point)) {
+            return self.interactiveArea;
+        }
+        return nil;  // Rest: Touch geht durch das Overlay hindurch
+    }
+    return hit;
+}
+@end
+
 static void showOverlay(void) {
     g_overlayCalls++;
     if (g_overlayWindow != nil) return;   // idempotent
@@ -254,13 +273,16 @@ static void showOverlay(void) {
     }
 
     UIViewController *vc = [UIViewController new];
-    vc.view.backgroundColor = [UIColor clearColor];
+    VCamPassView *passView = [[VCamPassView alloc] initWithFrame:[UIScreen mainScreen].bounds];
+    passView.backgroundColor = [UIColor clearColor];
+    vc.view = passView;
 
     // Probe: rotes Quadrat (diagnostisch)
     UIView *probe = [[UIView alloc] initWithFrame:CGRectMake(30, 100, 100, 100)];
     probe.backgroundColor = [UIColor redColor];
     probe.userInteractionEnabled = YES;
-    [vc.view addSubview:probe];
+    [passView addSubview:probe];
+    passView.interactiveArea = probe;
 
     g_overlayWindow.rootViewController = vc;
     g_overlayWindow.windowLevel = UIWindowLevelAlert + 1.0;
