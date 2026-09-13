@@ -46,6 +46,8 @@ static _Atomic uint64_t g_buildCalls = 0;
 static _Atomic uint64_t g_swapCount = 0;
 static _Atomic uint64_t g_origCount = 0;
 static _Atomic uint64_t g_hasLatestFrame = 0;
+static _Atomic uint64_t g_vtSessionAttempts = 0;
+static _Atomic int64_t g_vtSessionError = 0;
 
 // ---------------------------------------------------------------- Globals
 static NSMutableArray<NSData *> *g_nalQueue = nil;
@@ -129,6 +131,7 @@ static void pumpDecoder(void) {
 
         // --- VT-Session einmalig anlegen ---
         if (g_vtSession == NULL) {
+            atomic_fetch_add(&g_vtSessionAttempts, 1);
             VTDecompressionOutputCallbackRecord cb;
             cb.decompressionOutputCallback = decompressionOutputCallback;
             cb.decompressionOutputRefCon = NULL;
@@ -139,7 +142,9 @@ static void pumpDecoder(void) {
             OSStatus st = VTDecompressionSessionCreate(kCFAllocatorDefault, g_fmtDesc, NULL,
                 (__bridge CFDictionaryRef)attrs, &cb, &g_vtSession);
             if (st != noErr || !g_vtSession) {
-                L("VT-Session FAIL: %d", (int)st);
+                atomic_store(&g_vtSessionError, st);
+                L("VT-Session FAIL: %d (attempt %llu)", (int)st,
+                  (unsigned long long)atomic_load(&g_vtSessionAttempts));
                 return;
             }
             L("Decode-Session OK");
@@ -246,7 +251,8 @@ static void statusServerThread(void) {
         snprintf(msg, sizeof(msg),
             "rxNal=%llu sps=%llu pps=%llu idr=%llu "
             "formatDesc=%llu submit=%llu output=%llu errors=%llu "
-            "emit=%llu send=%llu build=%llu swap=%llu orig=%llu hasFrame=%llu\n",
+            "emit=%llu send=%llu build=%llu swap=%llu orig=%llu hasFrame=%llu "
+            "vtAttempts=%llu vtError=%lld\n",
             (unsigned long long)atomic_load(&g_rxNalCount),
             (unsigned long long)atomic_load(&g_spsCount),
             (unsigned long long)atomic_load(&g_ppsCount),
@@ -260,7 +266,9 @@ static void statusServerThread(void) {
             (unsigned long long)atomic_load(&g_buildCalls),
             (unsigned long long)atomic_load(&g_swapCount),
             (unsigned long long)atomic_load(&g_origCount),
-            (unsigned long long)atomic_load(&g_hasLatestFrame));
+            (unsigned long long)atomic_load(&g_hasLatestFrame),
+            (unsigned long long)atomic_load(&g_vtSessionAttempts),
+            (long long)atomic_load(&g_vtSessionError));
         send(c, msg, strlen(msg), 0);
         close(c);
     }
