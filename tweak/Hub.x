@@ -194,10 +194,6 @@ static void hubServerThread(void) {
 }
 
 // ---------------------------------------------------------------- Floating Button
-static void floatingButtonTapped(void) {
-    L("Button getippt");
-}
-
 static void setupFloatingButton(void) {
     CGRect screen = [UIScreen mainScreen].bounds;
     CGFloat size = 60.0;
