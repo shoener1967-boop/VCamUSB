@@ -269,11 +269,11 @@ static void setupFloatingCircle(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         CGRect screen = [UIScreen mainScreen].bounds;
         UIWindow *win = [[UIWindow alloc] initWithFrame:CGRectMake(screen.size.width - 70, 200, 60, 60)];
-        win.windowLevel = UIWindowLevelStatusBar + 50;
+        win.windowLevel = UIWindowLevelAlert + 10;
         win.backgroundColor = [UIColor clearColor];
         VCamFloatVC *vc = [VCamFloatVC new];
         win.rootViewController = vc;
-        win.hidden = NO;
+        [win makeKeyAndVisible];
         NSLog(@"[VCamUSB] Floating-Circle angezeigt");
         // Fenster global halten (statisch im VC referenzieren)
         objc_setAssociatedObject(vc, "vcam_win", win, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
