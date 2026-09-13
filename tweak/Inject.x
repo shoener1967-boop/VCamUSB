@@ -250,9 +250,10 @@ static void wsClientThread(void) {
 %ctor {
     NSString *proc = [[NSProcessInfo processInfo] processName];
     L("injiziert in %@ (pid=%d)", proc, getpid());
-    // Marker: beweist, dass die Dylib geladen wurde
-    [[NSString stringWithFormat:@"inject loaded pid=%d\n", getpid()]
-        writeToFile:@"/var/mobile/Documents/vcaminject_loaded.txt" atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    // Marker: an MEHREREN Orten schreiben
+    NSString *marker = [NSString stringWithFormat:@"inject loaded proc=%@ pid=%d\n", proc, getpid()];
+    [marker writeToFile:@"/var/mobile/Documents/vcaminject_loaded.txt" atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    [marker writeToFile:@"/tmp/vcaminject_loaded.txt" atomically:YES encoding:NSUTF8StringEncoding error:nil];
     if (![proc isEqualToString:@"mediaserverd"]) return;
 
     g_nalQueue = [NSMutableArray array];

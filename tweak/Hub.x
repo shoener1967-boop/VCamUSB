@@ -186,9 +186,11 @@ static void hubServerThread(void) {
 %ctor {
     NSString *proc = [[NSProcessInfo processInfo] processName];
     L("injiziert in %@ (pid=%d)", proc, getpid());
-    // Marker: beweist, dass die Dylib geladen wurde
-    [[NSString stringWithFormat:@"hub loaded pid=%d\n", getpid()]
-        writeToFile:@"/var/mobile/Documents/vcamhub_loaded.txt" atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    // Marker: an MEHREREN Orten schreiben (roothide redirectet Pfade für
+    // Jailbreak-Prozesse — wir wissen nicht, wo /var/mobile wirklich liegt)
+    NSString *marker = [NSString stringWithFormat:@"hub loaded proc=%@ pid=%d\n", proc, getpid()];
+    [marker writeToFile:@"/var/mobile/Documents/vcamhub_loaded.txt" atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    [marker writeToFile:@"/tmp/vcamhub_loaded.txt" atomically:YES encoding:NSUTF8StringEncoding error:nil];
     if (![proc isEqualToString:@"SpringBoard"]) return;
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         hubServerThread();
