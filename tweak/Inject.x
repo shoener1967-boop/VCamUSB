@@ -177,7 +177,7 @@ static CMSampleBufferRef buildSwapSampleBuffer(void) {
     CMSampleBufferRef fake = buildSwapSampleBuffer();
     if (fake) {
         g_swapCount++;
-        %orig(fake);
+        %orig((__bridge id)fake);
         CFRelease(fake);
         if (g_swapCount % 300 == 1) L("swap# %d", g_swapCount);
         return;
@@ -190,7 +190,7 @@ static CMSampleBufferRef buildSwapSampleBuffer(void) {
     CMSampleBufferRef fake = buildSwapSampleBuffer();
     if (fake) {
         g_swapCount++;
-        %orig(fake);
+        %orig((__bridge id)fake);
         CFRelease(fake);
         return;
     }
