@@ -1,14 +1,12 @@
-// VCamHub — WS-Server + Floating-Button in SpringBoard (Dopamine2-roothide)
+// VCamHub — WS-Server + Floating-Status-Button in SpringBoard (Dopamine2-roothide)
 //
-// Diagnose-Phase: Erst Sichtbarkeit eines roten Probe-Quadrats beweisen,
-// dann schrittweise Button/Kreis/Status/Farbe aufbauen (nach LordVCAM-Muster).
-//
-// Wichtige Punkte (nach Laufzeit-Analyse):
-//   - Window als statische Variable dauerhaft retained
-//   - kein rootViewController nötig (Referenz nutzt direkte Subviews)
-//   - hidden = NO statt makeKeyAndVisible (vermeidet Key-Window-Verhalten)
-//   - Fallback-Start: Notification + zusätzlich feste Verzögerung (idempotent)
-//   - UIKit ausschließlich auf dem Main-Thread
+// Architektur (final, nach Astra-Analyse):
+//   - Scene-gebundenes Fullscreen-UIWindow (initWithWindowScene:)
+//   - VCamOverlayWindow-Subklasse: hitTest:withEvent: gibt außerhalb des
+//     Button-/Panel-Bereichs nil zurück -> ALLE Touches gehen durch
+//   - Lockscreen-Sicherheitsnetz: bei Lock wird das Overlay sofort hidden
+//     und passThrough=YES, erst nach Unlock wieder sichtbar
+//   - Status-Server (8768) meldet auch locked=0/1 für Diagnose
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -31,12 +29,44 @@ static int g_clients[16] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
 static pthread_mutex_t g_cliMutex = PTHREAD_MUTEX_INITIALIZER;
 static int g_clientCount = 0;
 
-// ---------------------------------------------------------------- UI (dauerhaft retained)
+// ---------------------------------------------------------------- Overlay-Globals
 static UIWindow *g_overlayWindow = nil;
-static UIButton *g_floatingButton = nil;
-static int g_overlayCreated = 0;   // Diagnose-Flag, über Status-Port abfragbar
-static int g_overlayCalls = 0;     // wie oft showOverlay aufgerufen wurde
+static UIView *g_buttonContainer = nil;
+static int g_overlayCreated = 0;
+static int g_overlayCalls = 0;
+static BOOL g_locked = NO;
 
+// ---------------------------------------------------------------- Pass-Through Window
+@interface VCamOverlayWindow : UIWindow
+@property (nonatomic, weak) UIView *interactiveView;
+@property (nonatomic, weak) UIView *interactivePanel;
+@property (nonatomic, assign) BOOL passThrough;
+@end
+@implementation VCamOverlayWindow
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    if (self.hidden || self.alpha <= 0.01 || !self.userInteractionEnabled) return nil;
+    if (self.passThrough) return nil;
+
+    UIView *target = self.interactiveView;
+    if (!target || target.hidden || target.alpha <= 0.01) return nil;
+
+    CGRect buttonRect = [target.superview convertRect:target.frame toView:self];
+    buttonRect = CGRectInset(buttonRect, -8.0, -8.0);   // Touch-Toleranz
+
+    CGRect panelRect = CGRectNull;
+    if (self.interactivePanel && !self.interactivePanel.hidden) {
+        panelRect = [self.interactivePanel.superview convertRect:self.interactivePanel.frame toView:self];
+    }
+
+    if (CGRectContainsPoint(buttonRect, point) ||
+        (!CGRectIsNull(panelRect) && CGRectContainsPoint(panelRect, point))) {
+        return [super hitTest:point withEvent:event];
+    }
+    return nil;   // alles andere geht durch
+}
+@end
+
+// ---------------------------------------------------------------- Hub: Client-Verwaltung
 static void hubAddClient(int fd) {
     pthread_mutex_lock(&g_cliMutex);
     for (int i = 0; i < 16; i++) {
@@ -181,12 +211,12 @@ static void statusServerThread(void) {
         char msg[512];
         snprintf(msg, sizeof(msg),
             "overlayCalls=%d overlayCreated=%d window=%p clients=%d "
-            "windowScene=%p screen=%p root=%p hidden=%d\n",
+            "locked=%d hidden=%d passThrough=%d\n",
             g_overlayCalls, g_overlayCreated, g_overlayWindow, g_clientCount,
-            g_overlayWindow ? (__bridge void *)g_overlayWindow.windowScene : NULL,
-            g_overlayWindow ? (__bridge void *)g_overlayWindow.screen : NULL,
-            g_overlayWindow ? (__bridge void *)g_overlayWindow.rootViewController : NULL,
-            g_overlayWindow ? (int)g_overlayWindow.hidden : -1);
+            (int)g_locked,
+            g_overlayWindow ? (int)g_overlayWindow.hidden : -1,
+            g_overlayWindow && [g_overlayWindow isKindOfClass:[VCamOverlayWindow class]]
+                ? (int)((VCamOverlayWindow *)g_overlayWindow).passThrough : -1);
         send(c, msg, strlen(msg), 0);
         close(c);
     }
@@ -219,7 +249,7 @@ static void hubServerThread(void) {
     }
 }
 
-// ---------------------------------------------------------------- Overlay (Minimalprobe)
+// ---------------------------------------------------------------- Overlay
 static UIWindowScene *ActiveScene(void) {
     if (@available(iOS 13.0, *)) {
         for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
@@ -230,7 +260,6 @@ static UIWindowScene *ActiveScene(void) {
                 return ws;
             }
         }
-        // Fallback: Scene eines sichtbaren Fensters
         for (UIWindow *w in [UIApplication sharedApplication].windows) {
             if (!w.hidden && w.alpha > 0.0 && w.windowScene != nil) return w.windowScene;
         }
@@ -238,72 +267,103 @@ static UIWindowScene *ActiveScene(void) {
     return nil;
 }
 
-// ---------------------------------------------------------------- Pass-Through View
-// Fängt Touches NUR im Button-Bereich, leitet alles andere durch (Passcode etc.)
-@interface VCamPassView : UIView
-@property (nonatomic, strong) UIView *interactiveArea;
-@end
-@implementation VCamPassView
-- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    UIView *hit = [super hitTest:point withEvent:event];
-    if (hit == self) {
-        if (self.interactiveArea &&
-            CGRectContainsPoint(self.interactiveArea.frame, point)) {
-            return self.interactiveArea;
-        }
-        return nil;  // Rest: Touch geht durch das Overlay hindurch
+static BOOL IsLocked(void) {
+    @try {
+        id value = [[UIApplication sharedApplication] valueForKey:@"hasBlankedScreen"];
+        return [value boolValue];
+    } @catch (NSException *e) {
+        return NO;
     }
-    return hit;
 }
-@end
+
+static void HideOverlay(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        g_locked = YES;
+        if (g_overlayWindow && [g_overlayWindow isKindOfClass:[VCamOverlayWindow class]]) {
+            VCamOverlayWindow *w = (VCamOverlayWindow *)g_overlayWindow;
+            w.passThrough = YES;
+            w.hidden = YES;
+        }
+        L("Overlay versteckt (locked)");
+    });
+}
+
+static void ShowOverlayIfUnlocked(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (g_locked) return;
+        if (g_overlayWindow && [g_overlayWindow isKindOfClass:[VCamOverlayWindow class]]) {
+            VCamOverlayWindow *w = (VCamOverlayWindow *)g_overlayWindow;
+            w.passThrough = NO;
+            w.hidden = NO;
+        }
+        L("Overlay sichtbar (unlocked)");
+    });
+}
 
 static void showOverlay(void) {
     g_overlayCalls++;
     if (g_overlayWindow != nil) return;   // idempotent
 
-    UIWindowScene *scene = ActiveScene();
-    if (@available(iOS 13.0, *)) {
-        if (scene != nil) {
-            g_overlayWindow = [[UIWindow alloc] initWithWindowScene:scene];
-        } else {
-            g_overlayWindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-        }
-    } else {
-        g_overlayWindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+    // Sicherheits-Check: bei gesperrtem Gerät nichts anzeigen
+    if (IsLocked()) {
+        L("Gerät gesperrt — Overlay nicht erstellen");
+        return;
     }
 
-    UIViewController *vc = [UIViewController new];
-    VCamPassView *passView = [[VCamPassView alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    passView.backgroundColor = [UIColor clearColor];
-    vc.view = passView;
+    UIWindowScene *scene = ActiveScene();
+    VCamOverlayWindow *win = nil;
+    if (@available(iOS 13.0, *)) {
+        if (scene != nil) {
+            win = [[VCamOverlayWindow alloc] initWithWindowScene:scene];
+        } else {
+            win = [[VCamOverlayWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+        }
+    } else {
+        win = [[VCamOverlayWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+    }
 
-    // Probe: rotes Quadrat (diagnostisch)
-    UIView *probe = [[UIView alloc] initWithFrame:CGRectMake(30, 100, 100, 100)];
-    probe.backgroundColor = [UIColor redColor];
-    probe.userInteractionEnabled = YES;
-    [passView addSubview:probe];
-    passView.interactiveArea = probe;
+    if (@available(iOS 13.0, *)) {
+        win.frame = scene.coordinateSpace.bounds;
+    }
+    win.windowLevel = UIWindowLevelAlert + 1.0;
+    win.backgroundColor = [UIColor clearColor];
+    win.alpha = 1.0;
+    win.hidden = NO;
+    win.userInteractionEnabled = YES;
+    win.passThrough = NO;
 
-    g_overlayWindow.rootViewController = vc;
-    g_overlayWindow.windowLevel = UIWindowLevelAlert + 1.0;
-    g_overlayWindow.alpha = 1.0;
-    g_overlayWindow.hidden = NO;
-    g_overlayWindow.userInteractionEnabled = YES;
+    UIViewController *root = [UIViewController new];
+    root.view.backgroundColor = [UIColor clearColor];
+    root.view.userInteractionEnabled = YES;
+
+    // Grüner Status-Button (Container 64x64 oben rechts)
+    CGFloat size = 64.0;
+    CGFloat margin = 16.0;
+    CGRect screenB = [UIScreen mainScreen].bounds;
+    g_buttonContainer = [[UIView alloc] initWithFrame:
+        CGRectMake(screenB.size.width - size - margin, 120, size, size)];
+    g_buttonContainer.backgroundColor = [UIColor clearColor];
+    g_buttonContainer.userInteractionEnabled = YES;
+
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    button.frame = g_buttonContainer.bounds;
+    button.backgroundColor = [UIColor colorWithRed:0.16 green:0.78 blue:0.34 alpha:0.95];
+    button.layer.cornerRadius = size / 2.0;
+    button.layer.borderWidth = 3.0;
+    button.layer.borderColor = [UIColor whiteColor].CGColor;
+    button.userInteractionEnabled = YES;
+    [g_buttonContainer addSubview:button];
+
+    [root.view addSubview:g_buttonContainer];
+    win.rootViewController = root;
+    win.interactiveView = g_buttonContainer;
+
+    g_overlayWindow = win;
     [g_overlayWindow makeKeyAndVisible];
 
     g_overlayCreated = 1;
-    if (@available(iOS 13.0, *)) {
-        L("overlay: scene=%p windowScene=%p screen=%p hidden=%d alpha=%f level=%f frame=%@ root=%p sceneWindows=%lu",
-          (__bridge void *)scene, (__bridge void *)g_overlayWindow.windowScene,
-          (__bridge void *)g_overlayWindow.screen,
-          g_overlayWindow.hidden, g_overlayWindow.alpha, g_overlayWindow.windowLevel,
-          NSStringFromCGRect(g_overlayWindow.frame),
-          (__bridge void *)g_overlayWindow.rootViewController,
-          (unsigned long)scene.windows.count);
-    } else {
-        L("overlay (kein Scene-API): window=%p hidden=%d alpha=%f",
-          g_overlayWindow, g_overlayWindow.hidden, g_overlayWindow.alpha);
-    }
+    L("Overlay erstellt: window=%p scene=%p button=%p locked=%d",
+      g_overlayWindow, (__bridge void *)scene, g_buttonContainer, (int)IsLocked());
 }
 
 // ---------------------------------------------------------------- Entry
@@ -313,7 +373,6 @@ static void vcamhub_init(void) {
     L("ctor in %@ (pid=%d)", proc, getpid());
     if (![proc isEqualToString:@"SpringBoard"]) return;
 
-    // WS-Server + Status-Server (getrennte Hintergrund-Threads)
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         hubServerThread();
     });
@@ -321,16 +380,30 @@ static void vcamhub_init(void) {
         statusServerThread();
     });
 
-    // Overlay via Notification (LordVCAM-Muster)
-    [[NSNotificationCenter defaultCenter] addObserverForName:@"UIApplicationDidFinishLaunchingNotification"
+    // Lockscreen-Observer (mehrere Signale kombinieren)
+    NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+    [nc addObserverForName:@"SBDashBoardLockStateChangedNotification"
         object:nil queue:[NSOperationQueue mainQueue]
         usingBlock:^(NSNotification *note) {
-            L("DidFinishLaunchingNotification empfangen");
+            BOOL locked = [note.userInfo[@"locked"] boolValue];
+            if (locked) HideOverlay();
+            else { g_locked = NO; ShowOverlayIfUnlocked(); }
+        }];
+    [nc addObserverForName:@"SBLockScreenManagerLockCompleteNotification"
+        object:nil queue:[NSOperationQueue mainQueue]
+        usingBlock:^(NSNotification *note) { HideOverlay(); }];
+    [nc addObserverForName:@"SBLockScreenManagerUnlockCompleteNotification"
+        object:nil queue:[NSOperationQueue mainQueue]
+        usingBlock:^(NSNotification *note) { g_locked = NO; ShowOverlayIfUnlocked(); }];
+
+    // Overlay-Start (Notification + Fallback, idempotent)
+    [nc addObserverForName:@"UIApplicationDidFinishLaunchingNotification"
+        object:nil queue:[NSOperationQueue mainQueue]
+        usingBlock:^(NSNotification *note) {
+            L("DidFinishLaunching empfangen");
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{ showOverlay(); });
         }];
-
-    // Fallback: feste Verzögerung (falls Notification verpasst wurde)
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ showOverlay(); });
 
