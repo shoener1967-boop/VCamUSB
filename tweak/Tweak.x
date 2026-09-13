@@ -293,7 +293,7 @@ static void setupFloatingCircle(void) {
         win.rootViewController = vc;
         win.hidden = NO;
         // Key-Window-Status NICHT klauen (macht SpringBoard-Probleme), nur zeigen
-        vlog(@"[VCamUSB] Window created, hidden=NO, level=%f", win.windowLevel);
+        vlog([NSString stringWithFormat:@"[VCamUSB] Window created, hidden=NO, level=%.0f", (double)win.windowLevel]);
         objc_setAssociatedObject(vc, "vcam_win", win, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         vlog(@"[VCamUSB] Floating-Circle sollte sichtbar sein");
     });
