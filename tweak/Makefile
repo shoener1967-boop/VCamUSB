@@ -1,15 +1,15 @@
 # VCamUSB — virtuelle Kamera (Dopamine2-roothide / Relaxin)
-#   VCamHub   -> SpringBoard (WS-Server + präsentierter Status-Banner)
+#   VCamHub   -> SpringBoard (WS-Server + Floating-Button via UIWindow)
 #   VCamInject-> mediaserverd (WS-Client + Decode + FigCapture-Frame-Swap)
 #   VCamProbe -> minimaler Lade-/Diagnose-Canary (beide Prozesse)
 #
 # Build:  make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
 TWEAK_NAME := VCamHub VCamInject VCamProbe
 
-# ---- Hub: Substrate (%hook SpringBoard) + UIKit für Status-Panel
+# ---- Hub: kein Substrate (constructor + Notification-Observer), UIKit für UIWindow
 VCamHub_FILES := Hub.x
 VCamHub_CFLAGS := -fobjc-arc -Wno-unused-variable
-VCamHub_FRAMEWORKS := CydiaSubstrate UIKit
+VCamHub_FRAMEWORKS := UIKit
 
 # ---- Inject: Substrate (%hook) + Video-Decoder
 VCamInject_FILES := Inject.x

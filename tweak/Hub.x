@@ -1,19 +1,13 @@
-// VCamHub — WS-Server + Status-Banner in SpringBoard (Dopamine2-roothide)
+// VCamHub — WS-Server + schwebender Status-Banner in SpringBoard (Dopamine2-roothide)
 //
-// Architektur (nach Diagnose):
-//   - WS-Server auf 127.0.0.1:8767 läuft in einem __attribute__((constructor))-Thread
-//     (funktioniert nachweislich — Port offen, Fan-out aktiv).
-//   - Der schwebende Status-Banner wird NICHT über ein eigenes UIWindow erzeugt
-//     (unzuverlässig in SpringBoard), sondern über SpringBoards eigene
-//     UIViewController-Präsentationskette: %hook SpringBoard
-//     applicationDidFinishLaunching, dann verzögert den obersten VC ermitteln
-//     und einen leichten Status-Controller präsentieren.
-//
-// Logging: os_log (nicht /tmp — Pfadauflösung in SpringBoard unsicher).
+// Referenz-Muster (aus LordVCAM, funktioniert nachweislich auf iOS 16):
+//   - Eigener UIWindow (buttonWindow), makeKeyAndVisible, hoher windowLevel
+//   - Observer auf UIApplicationDidFinishLaunchingNotification
+//   - Button als Subview des Windows
+//   - WS-Server in eigenem Thread
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
-#import <substrate.h>
 #import <sys/socket.h>
 #import <netinet/in.h>
 #import <arpa/inet.h>
@@ -33,6 +27,21 @@ static int g_clients[16] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
 static pthread_mutex_t g_cliMutex = PTHREAD_MUTEX_INITIALIZER;
 static int g_clientCount = 0;
 
+// ---------------------------------------------------------------- Banner
+static UIWindow *g_buttonWindow = nil;
+static UIButton *g_floatingButton = nil;
+
+static void bannerUpdateStatus(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!g_floatingButton) return;
+        int clients = g_clientCount;
+        UIColor *c = clients > 0
+            ? [UIColor colorWithRed:0.16 green:0.78 blue:0.34 alpha:0.95]
+            : [UIColor colorWithRed:0.90 green:0.30 blue:0.30 alpha:0.95];
+        g_floatingButton.backgroundColor = c;
+    });
+}
+
 static void hubAddClient(int fd) {
     pthread_mutex_lock(&g_cliMutex);
     for (int i = 0; i < 16; i++) {
@@ -40,6 +49,7 @@ static void hubAddClient(int fd) {
     }
     pthread_mutex_unlock(&g_cliMutex);
     L("client+ total=%d", g_clientCount);
+    bannerUpdateStatus();
 }
 
 static void hubRemoveClient(int fd) {
@@ -49,6 +59,7 @@ static void hubRemoveClient(int fd) {
     }
     pthread_mutex_unlock(&g_cliMutex);
     L("client- total=%d", g_clientCount);
+    bannerUpdateStatus();
 }
 
 static void hubBroadcastExcept(int fromFd, const uint8_t *data, size_t len) {
@@ -182,90 +193,66 @@ static void hubServerThread(void) {
     }
 }
 
-// ---------------------------------------------------------------- Status-Controller
-@interface VCamStatusVC : UIViewController
-@end
-@implementation VCamStatusVC
-
-- (void)viewDidLoad {
-    [super viewDidLoad];
-    self.view.backgroundColor = [UIColor clearColor];
-
-    // Kleiner zentrierter Kreis + Statuslabel (einfach, robust — kein freies Drag nötig)
-    CGFloat size = 84.0;
-    UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
-    btn.frame = CGRectMake((self.view.bounds.size.width - size) / 2.0, 160, size, size);
-    btn.layer.cornerRadius = size / 2.0;
-    btn.backgroundColor = [UIColor colorWithRed:0.16 green:0.78 blue:0.34 alpha:0.95];
-    btn.layer.borderWidth = 3.0;
-    btn.layer.borderColor = [UIColor whiteColor].CGColor;
-    [btn setTitle:@"●" forState:UIControlStateNormal];
-    [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    btn.titleLabel.font = [UIFont boldSystemFontOfSize:34];
-    [btn addTarget:self action:@selector(close) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:btn];
-
-    UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(0, 260, self.view.bounds.size.width, 30)];
-    lbl.text = @"VCamUSB aktiv";
-    lbl.textColor = [UIColor whiteColor];
-    lbl.textAlignment = NSTextAlignmentCenter;
-    lbl.font = [UIFont boldSystemFontOfSize:17];
-    [self.view addSubview:lbl];
+// ---------------------------------------------------------------- Floating Button
+static void floatingButtonTapped(void) {
+    L("Button getippt");
 }
 
-- (void)close {
-    [self dismissViewControllerAnimated:YES completion:nil];
+static void setupFloatingButton(void) {
+    CGRect screen = [UIScreen mainScreen].bounds;
+    CGFloat size = 60.0;
+    CGFloat margin = 18.0;
+
+    g_buttonWindow = [[UIWindow alloc] initWithFrame:screen];
+    g_buttonWindow.windowLevel = UIWindowLevelAlert + 100.0;
+    g_buttonWindow.backgroundColor = [UIColor clearColor];
+
+    UIViewController *root = [[UIViewController alloc] init];
+    root.view.backgroundColor = [UIColor clearColor];
+    g_buttonWindow.rootViewController = root;
+
+    g_floatingButton = [UIButton buttonWithType:UIButtonTypeCustom];
+    g_floatingButton.frame = CGRectMake(screen.size.width - size - margin, 150, size, size);
+    g_floatingButton.layer.cornerRadius = size / 2.0;
+    g_floatingButton.layer.borderWidth = 3.0;
+    g_floatingButton.layer.borderColor = [UIColor whiteColor].CGColor;
+    g_floatingButton.layer.shadowColor = [UIColor blackColor].CGColor;
+    g_floatingButton.layer.shadowOpacity = 0.4;
+    g_floatingButton.layer.shadowRadius = 6.0;
+    g_floatingButton.layer.shadowOffset = CGSizeMake(0, 2);
+    [g_floatingButton setTitle:@"●" forState:UIControlStateNormal];
+    [g_floatingButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    g_floatingButton.titleLabel.font = [UIFont boldSystemFontOfSize:26];
+    [g_floatingButton addTarget:nil action:nil forControlEvents:UIControlEventTouchUpInside];
+    // Touch-Responder: eigener Selector über Category nicht nötig — Button sichtbar reicht
+    [root.view addSubview:g_floatingButton];
+
+    [g_buttonWindow makeKeyAndVisible];
+    bannerUpdateStatus();
+    L("Floating-Button erstellt (makeKeyAndVisible)");
 }
-@end
 
-// ---------------------------------------------------------------- Top-VC-Ermittlung
-static UIViewController *TopViewController(UIViewController *vc) {
-    while (vc.presentedViewController) vc = vc.presentedViewController;
-    if ([vc isKindOfClass:[UITabBarController class]]) {
-        UITabBarController *t = (UITabBarController *)vc;
-        if (t.selectedViewController) return TopViewController(t.selectedViewController);
-    }
-    if ([vc isKindOfClass:[UINavigationController class]]) {
-        UINavigationController *n = (UINavigationController *)vc;
-        if (n.visibleViewController) return TopViewController(n.visibleViewController);
-    }
-    return vc;
-}
-
-static void presentStatusPanel(void) {
-    UIWindow *w = [UIApplication sharedApplication].keyWindow;
-    if (!w) w = [[UIApplication sharedApplication].windows firstObject];
-    if (!w) { L("kein keyWindow"); return; }
-    UIViewController *root = w.rootViewController;
-    UIViewController *top = root ? TopViewController(root) : nil;
-    if (!top) { L("kein rootVC"); return; }
-    if (top.presentedViewController) { L("bereits präsentiert"); return; }
-
-    VCamStatusVC *panel = [[VCamStatusVC alloc] init];
-    panel.modalPresentationStyle = UIModalPresentationOverFullScreen;
-    [top presentViewController:panel animated:YES completion:nil];
-    L("Status-Panel präsentiert");
-}
-
-// ---------------------------------------------------------------- SpringBoard-Hook
-%hook SpringBoard
-- (void)applicationDidFinishLaunching:(id)application {
-    %orig;
-    L("SpringBoard didFinishLaunching — Status-Panel verzögert");
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6.0 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        presentStatusPanel();
-    });
-}
-%end
-
-// ---------------------------------------------------------------- Entry (WS-Server)
+// ---------------------------------------------------------------- Entry
 __attribute__((constructor))
 static void vcamhub_init(void) {
     NSString *proc = [[NSProcessInfo processInfo] processName];
     L("ctor in %@ (pid=%d)", proc, getpid());
     if (![proc isEqualToString:@"SpringBoard"]) return;
+
+    // WS-Server sofort
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         hubServerThread();
     });
+
+    // Floating-Button nach UIApplicationDidFinishLaunchingNotification (LordVCAM-Muster)
+    [[NSNotificationCenter defaultCenter] addObserverForName:@"UIApplicationDidFinishLaunchingNotification"
+        object:nil queue:[NSOperationQueue mainQueue]
+        usingBlock:^(NSNotification *note) {
+            L("UIApplicationDidFinishLaunchingNotification empfangen");
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                setupFloatingButton();
+            });
+        }];
+    L("Hub bereit (Observer registriert)");
 }
