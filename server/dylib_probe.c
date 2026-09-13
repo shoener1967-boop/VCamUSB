@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <mach/mach.h>
+#include <mach/mach_vm.h>
 #include <mach-o/dyld_images.h>
 
 int main(int argc, char **argv) {
