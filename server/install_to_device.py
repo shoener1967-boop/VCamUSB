@@ -1,4 +1,6 @@
-"""Installiert VCamUSB .deb auf dem iPhone via SSH-over-usbmuxd (kein iproxy nötig)."""
+"""Installiert VCamInject .deb auf dem iPhone via SSH-over-usbmuxd.
+Deinstalliert vorher VCamUSB (alt) und startet mediaserverd + SpringBoard neu.
+"""
 import socket, subprocess, sys, time
 
 DEB = r"C:\Users\shosh\VCamUSB\com.shosh.vcamusb_0.1.0_iphoneos-arm64e.deb"
@@ -29,7 +31,7 @@ def main():
                 break
             time.sleep(0.5)
     if not port_open():
-        print("[install] FEHLER: kein SSH auf :2222 erreichbar. Läuft iproxy?")
+        print("[install] FEHLER: kein SSH auf :2222 erreichbar.")
         return
 
     import paramiko
@@ -45,19 +47,23 @@ def main():
     sftp.put(DEB, remote)
     sftp.close()
 
-    def run(cmd):
-        stdin, stdout, stderr = cli.exec_command(cmd, timeout=60)
+    def run(cmd, timeout=60):
+        stdin, stdout, stderr = cli.exec_command(cmd, timeout=timeout)
         out = stdout.read().decode(errors="replace")
         err = stderr.read().decode(errors="replace")
         return out + err
 
+    # alte Version entfernen (Package-Name bleibt com.shosh.vcamusb)
+    print("[install] entferne alte Version...")
+    print(run("/var/jb/usr/bin/dpkg -r com.shosh.vcamusb 2>/dev/null; echo done"))
     print("[install] dpkg -i ...")
     print(run("/var/jb/usr/bin/dpkg -i " + remote))
-    print("[install] Status:")
-    print(run("/var/jb/usr/bin/dpkg -s com.shosh.vcamusb | head -20"))
     print("[install] Dateien:")
     print(run("ls -la /var/jb/Library/MobileSubstrate/DynamicLibraries/ | grep -i vcam"))
-    print("[install] Respring SpringBoard...")
+    # mediaserverd neu starten (nicht nur SpringBoard!)
+    print("[install] starte mediaserverd neu...")
+    print(run("/var/jb/usr/bin/killall -9 mediaserverd 2>/dev/null; sleep 1; echo msd-ok"))
+    print("[install] respring SpringBoard...")
     print(run("/var/jb/usr/bin/killall -9 SpringBoard 2>/dev/null; echo respring-ok"))
     cli.close()
     print("[install] FERTIG")

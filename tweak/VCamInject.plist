@@ -4,9 +4,9 @@
 <dict>
 	<key>Filter</key>
 	<dict>
-		<key>Bundles</key>
+		<key>Executables</key>
 		<array>
-			<string>com.apple.mediaserverd</string>
+			<string>mediaserverd</string>
 		</array>
 		<key>Mode</key>
 		<string>Any</string>
