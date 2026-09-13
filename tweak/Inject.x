@@ -1,18 +1,11 @@
-// VCamInject — virtuelle Kamera für mediaserverd (LordVCAM/chmp4-Muster)
+// VCamInject — Frame-Swap in mediaserverd (läuft neben VCamHub in SpringBoard)
 //
-// mediaserverd ist der zentrale Kamera-Daemon: ALLE Apps (Camera, Snapchat,
-// TikTok, WhatsApp ...) beziehen ihre Kamera-Frames von hier. Diese Dylib:
+// Verbindet sich per Loopback-WebSocket (Client!) zum Hub (127.0.0.1:8767),
+// empfängt H.264, decodiert zu CVPixelBuffer (420v — das native Kamera-Format),
+// und ersetzt in FigCaptureClientSessionMonitor die echten Frames.
 //
-//   1. läuft einen WebSocket-SERVER auf 127.0.0.1:8767 (PC verbindet sich
-//      übers USB-Kabel via usbmuxd-Tunnel — KEIN SSH, KEIN iproxy zur Laufzeit)
-//   2. empfängt H.264-Annex-B vom PC (OBS Virtual Camera / Video / Bild)
-//   3. decodiert via VideoToolbox zu CVPixelBuffer (420v — exakt das
-//      Kamera-Format, das die Capture-Pipeline erwartet)
-//   4. ersetzt in FigCaptureClientSessionMonitor die echten Frames durch
-//      unsere — genau die Klasse/Selektoren, die in LordVCAMs AVServicesd.dylib
-//      stehen (emitSampleBuffer: / sendMediaServerdSampleAtPoint:)
-//
-// Diagnose: os_log → am Gerät via  log show --predicate 'process == "mediaserverd"'
+// KEIN bind(), KEIN Server hier — nur connect() als Client, das ist in
+// mediaserverds Sandbox erlaubt (genau wie LordVCAM/chmp4 es machen).
 
 #import <Foundation/Foundation.h>
 #import <CoreVideo/CoreVideo.h>
@@ -24,7 +17,6 @@
 #import <arpa/inet.h>
 #import <CommonCrypto/CommonDigest.h>
 #import <os/log.h>
-#import <objc/runtime.h>
 
 #define WS_PORT 8767
 
@@ -40,15 +32,6 @@ static CMFormatDescriptionRef g_fmtDesc = NULL;
 static CVPixelBufferRef g_latestFrame = NULL;
 static NSLock *g_frameLock = nil;
 static int g_swapCount = 0;
-static int g_passCount = 0;
-
-// ---------------------------------------------------------------- WS Handshake
-static NSString *wsAcceptKey(NSString *key) {
-    NSString *magic = [key stringByAppendingString:@"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"];
-    unsigned char digest[CC_SHA1_DIGEST_LENGTH];
-    CC_SHA1([magic UTF8String], (CC_LONG)strlen([magic UTF8String]), digest);
-    return [[NSData dataWithBytes:digest length:CC_SHA1_DIGEST_LENGTH] base64EncodedStringWithOptions:0];
-}
 
 static void enqueueNal(NSData *nal) {
     if (nal.length < 4) return;
@@ -99,7 +82,6 @@ static void pumpDecoder(void) {
                 OSStatus st = CMVideoFormatDescriptionCreateFromH264ParameterSets(
                     kCFAllocatorDefault, 2, ptrs, sizes, 4, &g_fmtDesc);
                 if (st == noErr && g_fmtDesc) {
-                    size_t dw = 0, dh = 0;
                     CMVideoDimensions dims = CMVideoFormatDescriptionGetDimensions(g_fmtDesc);
                     L("FormatDescription OK %dx%d", (int)dims.width, (int)dims.height);
                 }
@@ -144,8 +126,6 @@ static void pumpDecoder(void) {
 }
 
 // ---------------------------------------------------------------- Frame-Swap
-// Baut aus unserem 420v-Frame ein CMSampleBuffer (exakt Kamera-Format) und
-// reicht es statt des echten Frames an die Capture-Pipeline weiter.
 static CMSampleBufferRef buildSwapSampleBuffer(void) {
     CVPixelBufferRef px = NULL;
     [g_frameLock lock];
@@ -171,7 +151,6 @@ static CMSampleBufferRef buildSwapSampleBuffer(void) {
 }
 
 // ---------------------------------------------------------------- FigCapture-Hook
-// Genau die Selektoren aus LordVCAMs AVServicesd.dylib.
 %hook FigCaptureClientSessionMonitor
 - (void)emitSampleBuffer:(id)sampleBuffer {
     CMSampleBufferRef fake = buildSwapSampleBuffer();
@@ -182,7 +161,6 @@ static CMSampleBufferRef buildSwapSampleBuffer(void) {
         if (g_swapCount % 300 == 1) L("swap# %d", g_swapCount);
         return;
     }
-    g_passCount++;
     %orig;
 }
 
@@ -194,100 +172,77 @@ static CMSampleBufferRef buildSwapSampleBuffer(void) {
         CFRelease(fake);
         return;
     }
-    g_passCount++;
     %orig;
 }
 %end
 
-// ---------------------------------------------------------------- WS Server
-static void wsServerThread(void) {
-    int srv = socket(AF_INET, SOCK_STREAM, 0);
-    if (srv < 0) { L("socket fail: %s", strerror(errno)); return; }
-    int one = 1;
-    setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-    struct sockaddr_in addr = {0};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = htons(WS_PORT);
-    if (bind(srv, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        L("bind fail: %s", strerror(errno));
-        close(srv);
-        return;
-    }
-    if (listen(srv, 4) < 0) { close(srv); return; }
-    L("WS-Server auf 127.0.0.1:%d", WS_PORT);
-
+// ---------------------------------------------------------------- WS-Client (Loopback zum Hub)
+static void wsClientThread(void) {
     while (1) {
-        struct sockaddr_in cli = {0};
-        socklen_t clen = sizeof(cli);
-        int fd = accept(srv, (struct sockaddr *)&cli, &clen);
-        if (fd < 0) continue;
-        L("WS-Client verbunden");
-        uint8_t *buf = malloc(16 * 1024 * 1024);
-        ssize_t n = recv(fd, buf, 16 * 1024 * 1024 - 1, 0);
-        if (n > 0) {
-            buf[n] = 0;
-            NSString *req = [NSString stringWithUTF8String:(const char *)buf];
-            NSRange keyR = [req rangeOfString:@"Sec-WebSocket-Key: "];
-            if (keyR.location != NSNotFound) {
-                NSString *key = [req substringFromIndex:keyR.location + keyR.length];
-                key = [[key componentsSeparatedByString:@"\r\n"].firstObject
-                       stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
-                NSString *resp = [NSString stringWithFormat:
-                    @"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %@\r\n\r\n",
-                    wsAcceptKey(key)];
-                send(fd, [resp UTF8String], strlen([resp UTF8String]), 0);
+        @autoreleasepool {
+            int fd = socket(AF_INET, SOCK_STREAM, 0);
+            if (fd < 0) { sleep(2); continue; }
+            struct sockaddr_in addr = {0};
+            addr.sin_family = AF_INET;
+            addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            addr.sin_port = htons(WS_PORT);
+            if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+                close(fd);
+                sleep(2);
+                continue;
+            }
+            char key[32];
+            srand((unsigned)time(NULL));
+            for (int i = 0; i < 24; i++) key[i] = "abcdefghijklmnopqrstuvwxyz0123456789"[rand() % 36];
+            key[24] = 0;
+            char req[512];
+            snprintf(req, sizeof(req),
+                "GET / HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n",
+                WS_PORT, key);
+            if (send(fd, req, (int)strlen(req), 0) < 0) { close(fd); sleep(2); continue; }
+            char resp[2048];
+            ssize_t n = recv(fd, resp, sizeof(resp) - 1, 0);
+            if (n <= 0 || strstr(resp, "101") == NULL) { close(fd); sleep(2); continue; }
+            L("mit Hub verbunden");
+            while (1) {
                 uint8_t hdr[2];
-                while (recv(fd, hdr, 2, MSG_WAITALL) == 2) {
-                    uint8_t opcode = hdr[0] & 0x0f;
-                    uint8_t masked = (hdr[1] >> 7) & 1;
-                    uint64_t plen = hdr[1] & 0x7f;
-                    if (plen == 126) {
-                        uint8_t ext[2];
-                        if (recv(fd, ext, 2, MSG_WAITALL) != 2) break;
-                        plen = ((uint64_t)ext[0] << 8) | ext[1];
-                    } else if (plen == 127) {
-                        uint8_t ext[8];
-                        if (recv(fd, ext, 8, MSG_WAITALL) != 8) break;
-                        plen = 0;
-                        for (int i = 0; i < 8; i++) plen = (plen << 8) | ext[i];
-                    }
-                    uint8_t mask[4] = {0};
-                    if (masked && recv(fd, mask, 4, MSG_WAITALL) != 4) break;
-                    if (plen > 16 * 1024 * 1024) break;
-                    uint8_t *payload = malloc((size_t)plen);
-                    size_t got = 0;
-                    while (got < plen) {
-                        ssize_t r = recv(fd, payload + got, (size_t)(plen - got), 0);
-                        if (r <= 0) break;
-                        got += (size_t)r;
-                    }
-                    if (got < plen) { free(payload); break; }
-                    if (masked) for (uint64_t i = 0; i < plen; i++) payload[i] ^= mask[i & 3];
-                    if (opcode == 0x8) { free(payload); break; }
-                    if (opcode == 0x9) {
-                        uint8_t pong_hdr[2] = {0x8A, (uint8_t)(plen & 0x7f)};
-                        send(fd, pong_hdr, 2, 0);
-                        if (plen > 0) send(fd, payload, (int)plen, 0);
-                        free(payload);
-                        continue;
-                    }
-                    if (opcode == 0x2) {
-                        enqueueNal([NSData dataWithBytesNoCopy:payload length:(NSUInteger)plen freeWhenDone:YES]);
-                        continue;
-                    }
-                    if (opcode == 0x1) {  // Text = Steuerung/Handshake vom PC
-                        NSString *s = [[NSString alloc] initWithBytes:payload length:(NSUInteger)plen encoding:NSUTF8StringEncoding];
-                        L("ctrl: %@", s);
-                        continue;
-                    }
+                ssize_t g = recv(fd, hdr, 2, MSG_WAITALL);
+                if (g != 2) break;
+                uint8_t opcode = hdr[0] & 0x0f;
+                uint8_t masked = (hdr[1] >> 7) & 1;
+                uint64_t plen = hdr[1] & 0x7f;
+                if (plen == 126) {
+                    uint8_t ext[2];
+                    if (recv(fd, ext, 2, MSG_WAITALL) != 2) break;
+                    plen = ((uint64_t)ext[0] << 8) | ext[1];
+                } else if (plen == 127) {
+                    uint8_t ext[8];
+                    if (recv(fd, ext, 8, MSG_WAITALL) != 8) break;
+                    plen = 0;
+                    for (int i = 0; i < 8; i++) plen = (plen << 8) | ext[i];
+                }
+                uint8_t mask[4] = {0};
+                if (masked && recv(fd, mask, 4, MSG_WAITALL) != 4) break;
+                if (plen > 8 * 1024 * 1024) break;
+                uint8_t *payload = malloc((size_t)plen);
+                size_t got = 0;
+                while (got < plen) {
+                    ssize_t r = recv(fd, payload + got, (size_t)(plen - got), 0);
+                    if (r <= 0) break;
+                    got += (size_t)r;
+                }
+                if (got < plen) { free(payload); break; }
+                if (masked) for (uint64_t i = 0; i < plen; i++) payload[i] ^= mask[i & 3];
+                if (opcode == 0x2) {
+                    enqueueNal([NSData dataWithBytesNoCopy:payload length:(NSUInteger)plen freeWhenDone:YES]);
+                } else {
                     free(payload);
                 }
             }
+            close(fd);
+            L("Hub-Verbindung verloren — Reconnect in 2s");
         }
-        free(buf);
-        close(fd);
-        L("WS-Client getrennt");
+        sleep(2);
     }
 }
 
@@ -302,7 +257,7 @@ static void wsServerThread(void) {
     g_frameLock = [NSLock new];
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        wsServerThread();
+        wsClientThread();
     });
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
         while (1) {
@@ -310,6 +265,5 @@ static void wsServerThread(void) {
             usleep(2500);
         }
     });
-
-    L("bereit — warte auf Frames vom PC");
+    L("bereit — verbinde mit Hub");
 }
