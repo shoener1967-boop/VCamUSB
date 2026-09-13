@@ -21,10 +21,10 @@ jobs:
           libgcuniversal: false
           altlist: false
 
-      - name: Build VCamUSB (roothide)
+      - name: Build VCamUSB (rootless-Test)
         working-directory: tweak
         run: |
-          make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
+          make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
 
       - name: Build dlopen_test (arm64)
         working-directory: server
