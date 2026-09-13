@@ -191,6 +191,13 @@ static void wsServerThread(void) {
                     if (got < plen) { free(payload); break; }
                     if (masked) for (uint64_t i = 0; i < plen; i++) payload[i] ^= mask[i & 3];
                     if (opcode == 0x8) { free(payload); break; }
+                    if (opcode == 0x9) { // ping -> pong (sonst killt der Client die Verbindung)
+                        uint8_t pong_hdr[2] = {0x8A, (uint8_t)(plen & 0x7f)};
+                        send(fd, pong_hdr, 2, 0);
+                        if (plen > 0) send(fd, payload, (int)plen, 0);
+                        free(payload);
+                        continue;
+                    }
                     if (opcode == 0x2) {
                         enqueueNal([NSData dataWithBytesNoCopy:payload length:(NSUInteger)plen freeWhenDone:YES]);
                         continue;

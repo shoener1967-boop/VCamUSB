@@ -99,7 +99,8 @@ class FramePusher:
         from websockets.asyncio.client import connect
         while not self._closed:
             try:
-                async with connect(f"ws://{self.ip}:{self.port}", max_size=16 * 1024 * 1024) as ws:
+                async with connect(f"ws://{self.ip}:{self.port}", max_size=16 * 1024 * 1024,
+                                   ping_interval=None, ping_timeout=None) as ws:
                     log.info("connected to %s:%s", self.ip, self.port)
                     await ws.send(json.dumps({"type": "hs", "v": 1}))
                     with open(self.pipe, "rb") as f:
