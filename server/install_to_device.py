@@ -60,9 +60,11 @@ def main():
     print(run("/var/jb/usr/bin/dpkg -i " + remote))
     print("[install] Dateien:")
     print(run("ls -la /var/jb/Library/MobileSubstrate/DynamicLibraries/ | grep -i vcam"))
-    # roothide: AutoPatch-Symlink anlegen (sonst lädt ElleKit die Dylib NICHT!)
-    print("[install] roothide-Patch-Symlink...")
+    # roothide: AutoPatch-Symlinks für BEIDE Dylibs (sonst lädt ElleKit sie NICHT!)
+    print("[install] roothide-Patch-Symlinks...")
     print(run("ln -sf /usr/lib/DynamicPatches/AutoPatches.dylib "
+              "/var/jb/Library/MobileSubstrate/DynamicLibraries/VCamHub.dylib.roothidepatch && "
+              "ln -sf /usr/lib/DynamicPatches/AutoPatches.dylib "
               "/var/jb/Library/MobileSubstrate/DynamicLibraries/VCamInject.dylib.roothidepatch && echo patch-ok"))
     # mediaserverd neu starten (nicht nur SpringBoard!)
     print("[install] starte mediaserverd neu...")
