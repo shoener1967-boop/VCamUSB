@@ -306,8 +306,17 @@ static void setupFloatingCircle(void) {
         win.hidden = NO;
         g_floatWindow = win;
 
-        // Weg 2: zusätzlich als Subview ins SpringBoard-KeyWindow (falls Weg 1 unsichtbar bleibt)
-        UIWindow *sbWin = [UIApplication sharedApplication].keyWindow;
+        // Weg 2: zusätzlich als Subview ins SpringBoard-Hauptwindow (Scene-API statt deprecated keyWindow)
+        UIWindow *sbWin = nil;
+        for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if ([scene isKindOfClass:[UIWindowScene class]]) {
+                for (UIWindow *w in scene.windows) {
+                    if (w.isKeyWindow) { sbWin = w; break; }
+                }
+                if (!sbWin && scene.windows.count > 0) sbWin = scene.windows.firstObject;
+                if (sbWin) break;
+            }
+        }
         if (sbWin && sbWin != win) {
             UIView *dup = [[UIView alloc] initWithFrame:CGRectMake(screen.size.width - 70, 200, 60, 60)];
             dup.backgroundColor = [UIColor colorWithRed:0.1 green:0.45 blue:0.95 alpha:0.92];
