@@ -23,6 +23,7 @@ VCamInject_LDFLAGS := -Wl,-rpath,@loader_path/.jbroot/usr/lib -Wl,-rpath,@loader
 
 VCamProbe_FILES := Probe.x
 VCamProbe_CFLAGS := -fobjc-arc -Wno-unused-variable
+VCamProbe_LIBRARIES := substrate
 VCamProbe_LDFLAGS := -Wl,-rpath,@loader_path/.jbroot/usr/lib -Wl,-rpath,@loader_path/.jbroot/Library/Frameworks
 
 include $(THEOS_MAKE_PATH)/tweak.mk

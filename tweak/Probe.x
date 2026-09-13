@@ -1,12 +1,13 @@
-// VCamProbe — Minimal-Test: lädt ElleKit überhaupt etwas in mediaserverd/SpringBoard?
+// VCamProbe — wie das funktionierende Original: MIT Substrate (%ctor)
 #import <Foundation/Foundation.h>
-#import <os/log.h>
+#import <substrate.h>
 
-__attribute__((constructor))
-static void probe_init(void) {
+%ctor {
     NSString *proc = [[NSProcessInfo processInfo] processName];
-    NSString *marker = [NSString stringWithFormat:@"PROBE loaded proc=%@ pid=%d\n", proc, getpid()];
-    [marker writeToFile:@"/tmp/vcamprobe_loaded.txt" atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    [marker writeToFile:@"/var/mobile/Documents/vcamprobe_loaded.txt" atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    NSLog(@"[VCamProbe] %@", marker);
+    NSString *msg = [NSString stringWithFormat:@"PROBE-SUBSTRATE proc=%@ pid=%d\n", proc, getpid()];
+    for (NSString *p in @[@"/tmp/vcamprobe_s.txt", @"/var/mobile/Documents/vcamprobe_s.txt"]) {
+        FILE *f = fopen([p UTF8String], "a");
+        if (f) { fputs([msg UTF8String], f); fclose(f); }
+    }
+    NSLog(@"[VCamProbe] %@", msg);
 }
