@@ -50,6 +50,7 @@ static _Atomic uint64_t g_hasLatestFrame = 0;
 static _Atomic uint64_t g_vtSessionAttempts = 0;
 static _Atomic int64_t g_vtSessionError = 0;
 static char g_methodDump[4096] = {0};
+static char g_methodDump2[4096] = {0};
 
 // ---------------------------------------------------------------- Globals
 static NSMutableArray<NSData *> *g_nalQueue = nil;
@@ -291,7 +292,11 @@ static void statusServerThread(void) {
             (unsigned long long)atomic_load(&g_vtSessionAttempts),
             (long long)atomic_load(&g_vtSessionError));
         if (g_methodDump[0]) {
-            int mw = snprintf(msg + w, sizeof(msg) - w, "methods: %s\n", g_methodDump);
+            int mw = snprintf(msg + w, sizeof(msg) - w, "BW: %s\n", g_methodDump);
+            if (mw > 0) w += mw;
+        }
+        if (g_methodDump2[0]) {
+            int mw = snprintf(msg + w, sizeof(msg) - w, "FigCap: %s\n", g_methodDump2);
             if (mw > 0) w += mw;
         }
         send(c, msg, w, 0);
@@ -370,22 +375,22 @@ static void wsClientThread(void) {
 }
 
 // ---------------------------------------------------------------- Methoden-Diagnose
-static void logMethodsOfClass(Class cls, const char *className) {
+static void logMethodsOfClass(Class cls, const char *className, char *dump) {
     if (!cls) {
-        snprintf(g_methodDump, sizeof(g_methodDump), "%s: KLASSE FEHLT", className);
+        snprintf(dump, 4096, "%s: KLASSE FEHLT", className);
         return;
     }
     unsigned int count = 0;
     Method *methods = class_copyMethodList(cls, &count);
     size_t off = 0;
-    g_methodDump[0] = 0;
-    off += snprintf(g_methodDump + off, sizeof(g_methodDump) - off, "%s: ", className);
-    for (unsigned int i = 0; i < count && off < sizeof(g_methodDump) - 200; i++) {
+    dump[0] = 0;
+    off += snprintf(dump + off, 4096 - off, "%s (%u Methoden): ", className, count);
+    for (unsigned int i = 0; i < count && off < 4096 - 200; i++) {
         SEL sel = method_getName(methods[i]);
         const char *name = sel_getName(sel);
         if (strstr(name, "ample") || strstr(name, "emit") || strstr(name, "utput")
             || strstr(name, "eliver") || strstr(name, "endSample")) {
-            int w = snprintf(g_methodDump + off, sizeof(g_methodDump) - off, "%s; ", name);
+            int w = snprintf(dump + off, 4096 - off, "%s; ", name);
             if (w > 0) off += w;
         }
     }
@@ -402,8 +407,8 @@ static void logMethodsOfClass(Class cls, const char *className) {
     // Methoden-Diagnose (einmalig nach kurzem Delay, damit Klassen geladen sind)
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        logMethodsOfClass(NSClassFromString(@"BWNodeOutput"), "BWNodeOutput");
-        logMethodsOfClass(NSClassFromString(@"FigCaptureClientSessionMonitor"), "FigCaptureClientSessionMonitor");
+        logMethodsOfClass(NSClassFromString(@"BWNodeOutput"), "BWNodeOutput", g_methodDump);
+        logMethodsOfClass(NSClassFromString(@"FigCaptureClientSessionMonitor"), "FigCaptureClientSessionMonitor", g_methodDump2);
     });
 
     g_nalQueue = [NSMutableArray array];
