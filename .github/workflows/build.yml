@@ -33,7 +33,8 @@ jobs:
           xcrun -sdk iphoneos clang -arch arm64 -isysroot $(xcrun -sdk iphoneos --show-sdk-path) -o dlopen_test dlopen_test.c
           xcrun -sdk iphoneos clang -arch arm64 -isysroot $(xcrun -sdk iphoneos --show-sdk-path) -o dylib_probe dylib_probe.c
           xcrun -sdk iphoneos clang -arch arm64 -isysroot $(xcrun -sdk iphoneos --show-sdk-path) -o connect_test connect_test.c
-          ldid -S dlopen_test dylib_probe connect_test
+          xcrun -sdk iphoneos clang -arch arm64 -isysroot $(xcrun -sdk iphoneos --show-sdk-path) -o read_port read_port.c
+          ldid -S dlopen_test dylib_probe connect_test read_port
 
       - name: Upload .deb
         uses: actions/upload-artifact@v4
@@ -44,3 +45,4 @@ jobs:
             server/dlopen_test
             server/dylib_probe
             server/connect_test
+            server/read_port
