@@ -282,9 +282,12 @@ static void vlog(NSString *msg) {
     }
 }
 
+static UIWindow *g_floatWindow = nil;
+
 static void setupFloatingCircle(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         vlog(@"[VCamUSB] setupFloatingCircle start");
+        if (g_floatWindow) return; // nicht doppelt
         CGRect screen = [UIScreen mainScreen].bounds;
         UIWindow *win = [[UIWindow alloc] initWithFrame:CGRectMake(screen.size.width - 70, 200, 60, 60)];
         win.windowLevel = UIWindowLevelAlert + 10;
@@ -292,9 +295,8 @@ static void setupFloatingCircle(void) {
         VCamFloatVC *vc = [VCamFloatVC new];
         win.rootViewController = vc;
         win.hidden = NO;
-        // Key-Window-Status NICHT klauen (macht SpringBoard-Probleme), nur zeigen
+        g_floatWindow = win; // STATISCHE Referenz halten!
         vlog([NSString stringWithFormat:@"[VCamUSB] Window created, hidden=NO, level=%.0f", (double)win.windowLevel]);
-        objc_setAssociatedObject(vc, "vcam_win", win, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         vlog(@"[VCamUSB] Floating-Circle sollte sichtbar sein");
     });
 }
