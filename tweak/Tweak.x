@@ -249,6 +249,7 @@ static void vlog(NSString *msg) {
 @end
 
 @interface VCamFloatVC : UIViewController
+- (void)onTap;
 @end
 
 @implementation VCamFloatVC {
@@ -360,7 +361,7 @@ static void setupFloatingCircle(void) {
         if (g_floatVC) return; // nicht doppelt
         CGRect screen = [UIScreen mainScreen].bounds;
 
-        // Pass-through-Fenster (Vollbild, fängt nur Kreis/Menü-Touches)
+        // Das eigene Fenster (mit Kreis + Menü-Views drin)
         VCamWindow *win = [[VCamWindow alloc] initWithFrame:screen];
         win.windowLevel = UIWindowLevelStatusBar + 100;
         win.backgroundColor = [UIColor clearColor];
@@ -368,7 +369,36 @@ static void setupFloatingCircle(void) {
         win.rootViewController = g_floatVC;
         win.hidden = NO;
         g_floatWindow = win;
-        vlog(@"[VCamUSB] Pass-through-Window aktiv (level 1100)");
+
+        // Zusätzlich: Kreis-View direkt ins SpringBoard-KeyWindow hängen
+        // (das war der Weg, der vorher sichtbar funktioniert hat)
+        UIWindow *sbWin = nil;
+        for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if ([scene isKindOfClass:[UIWindowScene class]]) {
+                for (UIWindow *w in scene.windows) {
+                    if (w.isKeyWindow) { sbWin = w; break; }
+                }
+                if (!sbWin && scene.windows.count > 0) sbWin = scene.windows.firstObject;
+                if (sbWin) break;
+            }
+        }
+        if (sbWin) {
+            // kleinen Button als Subview in SB-Root legen
+            UIButton *sbBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+            sbBtn.frame = CGRectMake(screen.size.width - 70, 200, 60, 60);
+            sbBtn.layer.cornerRadius = 30;
+            sbBtn.backgroundColor = [UIColor colorWithRed:0.1 green:0.45 blue:0.95 alpha:0.92];
+            sbBtn.titleLabel.font = [UIFont boldSystemFontOfSize:20];
+            [sbBtn setTitle:@"VC" forState:UIControlStateNormal];
+            // Tap leitet an unseren VC weiter (Menu auf eigenem Window)
+            [sbBtn addTarget:g_floatVC action:@selector(onTap) forControlEvents:UIControlEventTouchUpInside];
+            sbBtn.userInteractionEnabled = YES;
+            [sbWin.rootViewController.view addSubview:sbBtn];
+            vlog(@"[VCamUSB] SB-Button als Subview ins SpringBoard-KeyWindow");
+        } else {
+            vlog(@"[VCamUSB] KEIN SpringBoard-KeyWindow gefunden!");
+        }
+        vlog(@"[VCamUSB] Pass-through-Window + SB-Subview aktiv");
     });
 }
 
