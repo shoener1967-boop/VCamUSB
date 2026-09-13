@@ -1,13 +1,19 @@
-// VCamHub — WS-Server + schwebender Status-Banner in SpringBoard (roothide, ohne Substrate)
+// VCamHub — WS-Server + Status-Banner in SpringBoard (Dopamine2-roothide)
 //
-// - WS-Server auf 127.0.0.1:8767: nimmt Verbindungen von VCamInject (mediaserverd)
-//   und vom PC-Dashboard an und fächert Frames an alle anderen Clients aus (Fan-out).
-// - Schwebender, ziehbarer Status-Button: grün wenn mediaserverd verbunden, rot sonst.
-//   Tap öffnet/schließt ein kleines Info-Panel. Eigene UIWindow (kein Fremd-Subview),
-//   dadurch überlebt er SpringBoard-Fensterwechsel.
+// Architektur (nach Diagnose):
+//   - WS-Server auf 127.0.0.1:8767 läuft in einem __attribute__((constructor))-Thread
+//     (funktioniert nachweislich — Port offen, Fan-out aktiv).
+//   - Der schwebende Status-Banner wird NICHT über ein eigenes UIWindow erzeugt
+//     (unzuverlässig in SpringBoard), sondern über SpringBoards eigene
+//     UIViewController-Präsentationskette: %hook SpringBoard
+//     applicationDidFinishLaunching, dann verzögert den obersten VC ermitteln
+//     und einen leichten Status-Controller präsentieren.
+//
+// Logging: os_log (nicht /tmp — Pfadauflösung in SpringBoard unsicher).
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <substrate.h>
 #import <sys/socket.h>
 #import <netinet/in.h>
 #import <arpa/inet.h>
@@ -27,37 +33,13 @@ static int g_clients[16] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
 static pthread_mutex_t g_cliMutex = PTHREAD_MUTEX_INITIALIZER;
 static int g_clientCount = 0;
 
-// ---------------------------------------------------------------- Banner-Globals
-static UIWindow *g_bannerWindow = nil;
-static UIButton *g_bannerButton = nil;
-static UILabel *g_statusLabel = nil;
-static UIView *g_infoPanel = nil;
-static BOOL g_infoVisible = NO;
-
-static void bannerUpdateStatus(void) {
-    int clients = g_clientCount;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (!g_bannerButton) return;
-        UIColor *c = clients > 0
-            ? [UIColor colorWithRed:0.16 green:0.78 blue:0.34 alpha:0.92]
-            : [UIColor colorWithRed:0.90 green:0.30 blue:0.30 alpha:0.92];
-        g_bannerButton.backgroundColor = c;
-        g_bannerButton.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.5].CGColor;
-        if (g_statusLabel) {
-            g_statusLabel.text = clients > 0
-                ? [NSString stringWithFormat:@"VCamUSB ● %d verbunden", clients]
-                : @"VCamUSB ● getrennt";
-        }
-    });
-}
-
 static void hubAddClient(int fd) {
     pthread_mutex_lock(&g_cliMutex);
     for (int i = 0; i < 16; i++) {
         if (g_clients[i] == -1) { g_clients[i] = fd; g_clientCount++; break; }
     }
     pthread_mutex_unlock(&g_cliMutex);
-    bannerUpdateStatus();
+    L("client+ total=%d", g_clientCount);
 }
 
 static void hubRemoveClient(int fd) {
@@ -66,7 +48,7 @@ static void hubRemoveClient(int fd) {
         if (g_clients[i] == fd) { g_clients[i] = -1; g_clientCount--; break; }
     }
     pthread_mutex_unlock(&g_cliMutex);
-    bannerUpdateStatus();
+    L("client- total=%d", g_clientCount);
 }
 
 static void hubBroadcastExcept(int fromFd, const uint8_t *data, size_t len) {
@@ -122,7 +104,6 @@ static void *hubClientThread(void *arg) {
                     wsAcceptKey(key)];
                 send(fd, [resp UTF8String], strlen([resp UTF8String]), 0);
                 hubAddClient(fd);
-                L("Client verbunden (fd=%d, total=%d)", fd, g_clientCount);
                 uint8_t hdr[2];
                 while (recv(fd, hdr, 2, MSG_WAITALL) == 2) {
                     uint8_t opcode = hdr[0] & 0x0f;
@@ -166,7 +147,6 @@ static void *hubClientThread(void *arg) {
                     free(payload);
                 }
                 hubRemoveClient(fd);
-                L("Client getrennt (fd=%d, total=%d)", fd, g_clientCount);
             }
         }
         free(buf);
@@ -190,8 +170,7 @@ static void hubServerThread(void) {
         return;
     }
     if (listen(srv, 8) < 0) { close(srv); return; }
-    L("Hub-WS-Server auf 127.0.0.1:%d", WS_PORT);
-
+    L("WS-Server auf 127.0.0.1:%d", WS_PORT);
     while (1) {
         struct sockaddr_in cli = {0};
         socklen_t clen = sizeof(cli);
@@ -203,129 +182,90 @@ static void hubServerThread(void) {
     }
 }
 
-// ---------------------------------------------------------------- Banner-UI
-static CGPoint g_panStart;
-static void bannerToggleInfo(void);
-
-// Target-Klasse für Button/Gesten (hält Referenz, damit Selectoren auflösbar sind)
-@interface VCamBannerTarget : NSObject
-- (void)bannerTap;
-- (void)bannerPan:(UIPanGestureRecognizer *)pan;
+// ---------------------------------------------------------------- Status-Controller
+@interface VCamStatusVC : UIViewController
 @end
-@implementation VCamBannerTarget
-- (void)bannerTap {
-    bannerToggleInfo();
+@implementation VCamStatusVC
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = [UIColor clearColor];
+
+    // Kleiner zentrierter Kreis + Statuslabel (einfach, robust — kein freies Drag nötig)
+    CGFloat size = 84.0;
+    UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
+    btn.frame = CGRectMake((self.view.bounds.size.width - size) / 2.0, 160, size, size);
+    btn.layer.cornerRadius = size / 2.0;
+    btn.backgroundColor = [UIColor colorWithRed:0.16 green:0.78 blue:0.34 alpha:0.95];
+    btn.layer.borderWidth = 3.0;
+    btn.layer.borderColor = [UIColor whiteColor].CGColor;
+    [btn setTitle:@"●" forState:UIControlStateNormal];
+    [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    btn.titleLabel.font = [UIFont boldSystemFontOfSize:34];
+    [btn addTarget:self action:@selector(close) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:btn];
+
+    UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(0, 260, self.view.bounds.size.width, 30)];
+    lbl.text = @"VCamUSB aktiv";
+    lbl.textColor = [UIColor whiteColor];
+    lbl.textAlignment = NSTextAlignmentCenter;
+    lbl.font = [UIFont boldSystemFontOfSize:17];
+    [self.view addSubview:lbl];
 }
-- (void)bannerPan:(UIPanGestureRecognizer *)pan {
-    CGPoint t = [pan translationInView:g_bannerWindow];
-    UIView *v = pan.view;
-    if (pan.state == UIGestureRecognizerStateBegan) {
-        g_panStart = v.center;
-    } else if (pan.state == UIGestureRecognizerStateChanged) {
-        v.center = CGPointMake(g_panStart.x + t.x, g_panStart.y + t.y);
+
+- (void)close {
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+@end
+
+// ---------------------------------------------------------------- Top-VC-Ermittlung
+static UIViewController *TopViewController(UIViewController *vc) {
+    while (vc.presentedViewController) vc = vc.presentedViewController;
+    if ([vc isKindOfClass:[UITabBarController class]]) {
+        UITabBarController *t = (UITabBarController *)vc;
+        if (t.selectedViewController) return TopViewController(t.selectedViewController);
     }
-}
-@end
-static VCamBannerTarget *g_bannerTarget = nil;
-
-static void bannerToggleInfo(void) {
-    g_infoVisible = !g_infoVisible;
-    [UIView animateWithDuration:0.18 animations:^{
-        g_infoPanel.alpha = g_infoVisible ? 1.0 : 0.0;
-        g_infoPanel.transform = g_infoVisible ? CGAffineTransformIdentity : CGAffineTransformMakeScale(0.9, 0.9);
-    }];
+    if ([vc isKindOfClass:[UINavigationController class]]) {
+        UINavigationController *n = (UINavigationController *)vc;
+        if (n.visibleViewController) return TopViewController(n.visibleViewController);
+    }
+    return vc;
 }
 
-static void bannerSetup(void) {
-    CGRect screen = [UIScreen mainScreen].bounds;
-    CGFloat size = 56.0;
-    CGFloat margin = 16.0;
+static void presentStatusPanel(void) {
+    UIWindow *w = [UIApplication sharedApplication].keyWindow;
+    if (!w) w = [[UIApplication sharedApplication].windows firstObject];
+    if (!w) { L("kein keyWindow"); return; }
+    UIViewController *root = w.rootViewController;
+    UIViewController *top = root ? TopViewController(root) : nil;
+    if (!top) { L("kein rootVC"); return; }
+    if (top.presentedViewController) { L("bereits präsentiert"); return; }
 
-    g_bannerTarget = [[VCamBannerTarget alloc] init];
-
-    // Eigene UIWindow — sehr hoher Level (über Alert), makeKeyAndVisible nötig
-    g_bannerWindow = [[UIWindow alloc] initWithFrame:screen];
-    g_bannerWindow.windowLevel = 3000.0;
-    g_bannerWindow.backgroundColor = [UIColor clearColor];
-
-    UIViewController *root = [[UIViewController alloc] init];
-    root.view.backgroundColor = [UIColor clearColor];
-    g_bannerWindow.rootViewController = root;
-    [g_bannerWindow makeKeyAndVisible];
-
-    // Button (kreisförmig)
-    g_bannerButton = [UIButton buttonWithType:UIButtonTypeCustom];
-    g_bannerButton.frame = CGRectMake(screen.size.width - size - margin, 140, size, size);
-    g_bannerButton.layer.cornerRadius = size / 2.0;
-    g_bannerButton.layer.borderWidth = 2.0;
-    g_bannerButton.layer.shadowColor = [UIColor blackColor].CGColor;
-    g_bannerButton.layer.shadowOpacity = 0.35;
-    g_bannerButton.layer.shadowRadius = 6.0;
-    g_bannerButton.layer.shadowOffset = CGSizeMake(0, 2);
-    [g_bannerButton setTitle:@"●" forState:UIControlStateNormal];
-    g_bannerButton.titleLabel.font = [UIFont boldSystemFontOfSize:22];
-    [g_bannerButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    [g_bannerButton addTarget:g_bannerTarget action:@selector(bannerTap) forControlEvents:UIControlEventTouchUpInside];
-    [root.view addSubview:g_bannerButton];
-
-    // Drag-Geste
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:g_bannerTarget action:@selector(bannerPan:)];
-    [g_bannerButton addGestureRecognizer:pan];
-
-    // Info-Panel
-    g_infoPanel = [[UIView alloc] initWithFrame:CGRectMake(margin, 90, screen.size.width - 2 * margin, 74)];
-    g_infoPanel.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.92];
-    g_infoPanel.layer.cornerRadius = 14;
-    g_infoPanel.layer.borderWidth = 1.0;
-    g_infoPanel.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.2].CGColor;
-    g_infoPanel.alpha = 0.0;
-
-    g_statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(14, 12, g_infoPanel.bounds.size.width - 28, 24)];
-    g_statusLabel.textColor = [UIColor whiteColor];
-    g_statusLabel.font = [UIFont boldSystemFontOfSize:15];
-    g_statusLabel.text = @"VCamUSB";
-    [g_infoPanel addSubview:g_statusLabel];
-
-    UILabel *portLabel = [[UILabel alloc] initWithFrame:CGRectMake(14, 40, g_infoPanel.bounds.size.width - 28, 20)];
-    portLabel.textColor = [UIColor colorWithWhite:0.7 alpha:1.0];
-    portLabel.font = [UIFont systemFontOfSize:12];
-    portLabel.text = [NSString stringWithFormat:@"WebSocket 127.0.0.1:%d", WS_PORT];
-    [g_infoPanel addSubview:portLabel];
-
-    [root.view addSubview:g_infoPanel];
-    [g_bannerWindow makeKeyAndVisible];
-
-    bannerUpdateStatus();
-    L("Banner erstellt");
-
-    // Diagnose-Marker schreiben (sichtbar via /tmp)
-    NSString *m = [NSString stringWithFormat:@"banner created pid=%d\n", getpid()];
-    [m writeToFile:@"/tmp/vcam_banner.txt" atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    FILE *bf = fopen("/tmp/vcam_banner2.txt", "a");
-    if (bf) { fprintf(bf, "bannerSetup ran pid=%d\n", getpid()); fclose(bf); }
+    VCamStatusVC *panel = [[VCamStatusVC alloc] init];
+    panel.modalPresentationStyle = UIModalPresentationOverFullScreen;
+    [top presentViewController:panel animated:YES completion:nil];
+    L("Status-Panel präsentiert");
 }
 
-// ---------------------------------------------------------------- Entry
+// ---------------------------------------------------------------- SpringBoard-Hook
+%hook SpringBoard
+- (void)applicationDidFinishLaunching:(id)application {
+    %orig;
+    L("SpringBoard didFinishLaunching — Status-Panel verzögert");
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        presentStatusPanel();
+    });
+}
+%end
+
+// ---------------------------------------------------------------- Entry (WS-Server)
 __attribute__((constructor))
 static void vcamhub_init(void) {
     NSString *proc = [[NSProcessInfo processInfo] processName];
-    L("injiziert in %@ (pid=%d)", proc, getpid());
-
-    // Diagnose: fopen-Marker sofort (Constructor lief?)
-    FILE *mf = fopen("/tmp/vcamhub_ctor.txt", "a");
-    if (mf) { fprintf(mf, "ctor proc=%s pid=%d\n", [proc UTF8String], getpid()); fclose(mf); }
-
+    L("ctor in %@ (pid=%d)", proc, getpid());
     if (![proc isEqualToString:@"SpringBoard"]) return;
-
-    // Banner verzögert starten (SpringBoard braucht einen Moment zum Hochfahren)
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        bannerSetup();
-    });
-
-    // WS-Server im Hintergrund
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         hubServerThread();
     });
-    L("Hub bereit");
 }
