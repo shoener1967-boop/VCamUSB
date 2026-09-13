@@ -233,133 +233,13 @@ static void vlog(NSString *msg) {
     }
 }
 
-// ---------------------------------------------------------------- Floating Circle
-// Pass-through-Window: fängt Touches nur auf echten Controls ab, Rest geht durch.
-@interface VCamWindow : UIWindow
-@end
+// ---------------------------------------------------------------- UI (chmp4-Muster)
+// KEIN eigenes Window, KEIN Fremd-Subview — das war der Crash-Grund.
+// Trigger: Volume-Up-Taste (genau wie chmp4/NetHelper).
+// Menü: UIAlertController, präsentiert über den offiziellen presentViewController-Weg,
+// den SpringBoard selbst verwaltet — kann nicht "weggeräumt" werden.
 
-@implementation VCamWindow
-- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    UIView *hit = [super hitTest:point withEvent:event];
-    if (hit == self || hit == self.rootViewController.view) {
-        return nil; // durchlassen
-    }
-    return hit;
-}
-@end
-
-@interface VCamFloatVC : UIViewController
-- (void)onTap;
-@end
-
-static UIWindow *findSBKeyWindow(void);
-
-@implementation VCamFloatVC {
-    UIView *_menuView;
-    BOOL _menuOpen;
-    UIButton *_circleBtn;
-    CGPoint _circleCenter;
-}
-
-- (void)loadView {
-    self.view = [[UIView alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    self.view.backgroundColor = [UIColor clearColor];
-
-    // Plain UIView + Tap-Gesture statt UIButton (UIButton-Actions werden in SB oft verschluckt)
-    _circleBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    _circleBtn.frame = CGRectMake(0, 0, 60, 60);
-    _circleBtn.layer.cornerRadius = 30;
-    _circleBtn.backgroundColor = [UIColor colorWithRed:0.1 green:0.45 blue:0.95 alpha:0.92];
-    _circleBtn.titleLabel.font = [UIFont boldSystemFontOfSize:20];
-    [_circleBtn setTitle:@"VC" forState:UIControlStateNormal];
-    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(onTap)];
-    [_circleBtn addGestureRecognizer:tap];
-    _circleCenter = CGPointMake([UIScreen mainScreen].bounds.size.width - 40, 230);
-    _circleBtn.center = _circleCenter;
-    [self.view addSubview:_circleBtn];
-
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(onDrag:)];
-    [_circleBtn addGestureRecognizer:pan];
-    _menuOpen = NO;
-}
-
-- (void)onTap {
-    vlog([NSString stringWithFormat:@"[VCamUSB] Tap! Frames=%d", g_frameCount]);
-    if (_menuOpen) {
-        [_menuView removeFromSuperview];
-        _menuView = nil;
-        _menuOpen = NO;
-        return;
-    }
-    _menuOpen = YES;
-    // Menü unterhalb/neben dem Kreis platzieren (clamped an den Screen)
-    CGRect screen = [UIScreen mainScreen].bounds;
-    CGFloat mx = screen.size.width - 260;
-    CGFloat my = 270;
-    if (my + 190 > screen.size.height - 10) my = 40;
-
-    _menuView = [[UIView alloc] initWithFrame:CGRectMake(mx, my, 250, 180)];
-    _menuView.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.95];
-    _menuView.layer.cornerRadius = 14;
-    _menuView.clipsToBounds = YES;
-
-    NSArray *items = @[
-        @{@"t": @"USB (PC-Server)", @"a": @"usb"},
-        @{@"t": @"WLAN (PC-Server)", @"a": @"wlan"},
-        @{@"t": @"Album (Video)", @"a": @"album"},
-        @{@"t": [NSString stringWithFormat:@"Frames: %d", g_frameCount], @"a": @"status"},
-    ];
-    for (int i = 0; i < items.count; i++) {
-        UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
-        b.frame = CGRectMake(0, i * 44, 250, 44);
-        [b setTitle:items[i][@"t"] forState:UIControlStateNormal];
-        [b setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-        b.tag = i;
-        [b addTarget:self action:@selector(menuAction:) forControlEvents:UIControlEventTouchUpInside];
-        [_menuView addSubview:b];
-    }
-    // Menü DIREKT ins SpringBoard-KeyWindow hängen (da ist es sichtbar)
-    UIWindow *sbWin = findSBKeyWindow();
-    [sbWin.rootViewController.view addSubview:_menuView];
-    [sbWin.rootViewController.view bringSubviewToFront:_menuView];
-}
-
-- (void)menuAction:(UIButton *)sender {
-    switch (sender.tag) {
-        case 0: vlog(@"[VCamUSB] Modus: USB"); break;
-        case 1: vlog(@"[VCamUSB] Modus: WLAN"); break;
-        case 2: vlog(@"[VCamUSB] Modus: Album"); break;
-        default: break;
-    }
-    [_menuView removeFromSuperview];
-    _menuView = nil;
-    _menuOpen = NO;
-}
-
-- (void)onDrag:(UIPanGestureRecognizer *)pan {
-    if (pan.state == UIGestureRecognizerStateBegan) {
-        _circleCenter = _circleBtn.center;
-    }
-    CGPoint t = [pan translationInView:self.view];
-    CGPoint c = CGPointMake(_circleCenter.x + t.x, _circleCenter.y + t.y);
-    CGRect sb = [UIScreen mainScreen].bounds;
-    if (c.x < 40) c.x = 40;
-    if (c.x > sb.size.width - 40) c.x = sb.size.width - 40;
-    if (c.y < 60) c.y = 60;
-    if (c.y > sb.size.height - 40) c.y = sb.size.height - 40;
-    _circleBtn.center = c;
-    if (pan.state == UIGestureRecognizerStateEnded) {
-        if (c.x < sb.size.width / 2) c.x = 40;
-        else c.x = sb.size.width - 40;
-        [UIView animateWithDuration:0.2 animations:^{ _circleBtn.center = CGPointMake(c.x, _circleBtn.center.y); }];
-        _circleCenter = _circleBtn.center;
-    }
-}
-@end
-
-static VCamWindow *g_floatWindow = nil;
-static VCamFloatVC *g_floatVC = nil;
-static UIView *g_sbBtn = nil;
+static int g_mode = 0; // 0=USB, 1=WLAN, 2=Album
 
 static UIWindow *findSBKeyWindow(void) {
     for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
@@ -373,52 +253,48 @@ static UIWindow *findSBKeyWindow(void) {
     return nil;
 }
 
-// Watchdog: stellt den Kreis wieder her, falls SpringBoard ihn entfernt
-static void circleWatchdog(void) {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-        UIWindow *sbWin = findSBKeyWindow();
-        if (sbWin && g_sbBtn && g_sbBtn.superview == nil) {
-            [sbWin.rootViewController.view addSubview:g_sbBtn];
-            [sbWin.rootViewController.view bringSubviewToFront:g_sbBtn];
-            vlog(@"[VCamUSB] Watchdog: Kreis wiederhergestellt");
-        }
-        circleWatchdog();
-    });
+static NSTimeInterval g_lastVolTrigger = 0;
+
+static void showVCamMenu(void) {
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    if (now - g_lastVolTrigger < 1.0) return; // Debounce bei Tasten-Wiederholung
+    g_lastVolTrigger = now;
+
+    UIWindow *sbWin = findSBKeyWindow();
+    UIViewController *top = sbWin ? sbWin.rootViewController : nil;
+    while (top && top.presentedViewController) top = top.presentedViewController;
+    if (!top) {
+        vlog(@"[VCamUSB] Kein VC zum Präsentieren gefunden");
+        return;
+    }
+
+    vlog(@"[VCamUSB] Volume-Up gedrückt — Menü öffnen");
+    UIAlertController *menu = [UIAlertController alertControllerWithTitle:@"VCamUSB"
+        message:[NSString stringWithFormat:@"Frames: %d | Modus: %@", g_frameCount,
+            g_mode == 0 ? @"USB" : g_mode == 1 ? @"WLAN" : @"Album"]
+        preferredStyle:UIAlertControllerStyleActionSheet];
+
+    [menu addAction:[UIAlertAction actionWithTitle:@"USB (PC-Server)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a){
+        g_mode = 0; vlog(@"[VCamUSB] Modus: USB");
+    }]];
+    [menu addAction:[UIAlertAction actionWithTitle:@"WLAN (PC-Server)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a){
+        g_mode = 1; vlog(@"[VCamUSB] Modus: WLAN");
+    }]];
+    [menu addAction:[UIAlertAction actionWithTitle:@"Album (Video)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a){
+        g_mode = 2; vlog(@"[VCamUSB] Modus: Album");
+    }]];
+    [menu addAction:[UIAlertAction actionWithTitle:@"Abbrechen" style:UIAlertActionStyleCancel handler:nil]];
+
+    [top presentViewController:menu animated:YES completion:nil];
 }
 
-static void setupFloatingCircle(void) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        vlog(@"[VCamUSB] setupFloatingCircle start");
-        if (g_sbBtn) return; // nicht doppelt
-        CGRect screen = [UIScreen mainScreen].bounds;
-
-        UIWindow *sbWin = findSBKeyWindow();
-        if (!sbWin) {
-            vlog(@"[VCamUSB] KEIN SpringBoard-KeyWindow gefunden!");
-            // später nochmal versuchen
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-                g_sbBtn = nil;
-                setupFloatingCircle();
-            });
-            return;
-        }
-
-        // Kreis direkt ins SB-KeyWindow — der einzige Weg, der sichtbar funktioniert
-        UIButton *sbBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-        sbBtn.frame = CGRectMake(screen.size.width - 70, 200, 60, 60);
-        sbBtn.layer.cornerRadius = 30;
-        sbBtn.backgroundColor = [UIColor colorWithRed:0.1 green:0.45 blue:0.95 alpha:0.92];
-        sbBtn.titleLabel.font = [UIFont boldSystemFontOfSize:20];
-        [sbBtn setTitle:@"VC" forState:UIControlStateNormal];
-        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:g_floatVC action:@selector(onTap)];
-        [sbBtn addGestureRecognizer:tap];
-        [sbWin.rootViewController.view addSubview:sbBtn];
-        [sbWin.rootViewController.view bringSubviewToFront:sbBtn];
-        g_sbBtn = sbBtn;
-        vlog(@"[VCamUSB] Kreis im SB-KeyWindow platziert + Watchdog gestartet");
-        circleWatchdog();
-    });
+// Hook auf die Volume-Up-Taste in SpringBoard — genau wie chmp4s NetHelper.dylib
+%hook SBDashBoardLockScreenEnvironment
+- (void)handleVolumeUpButtonPress {
+    %orig;
+    showVCamMenu();
 }
+%end
 
 %ctor {
     NSString *proc = [[NSProcessInfo processInfo] processName];
@@ -429,7 +305,6 @@ static void setupFloatingCircle(void) {
     g_nalQueue = [NSMutableArray array];
     g_queueLock = [NSLock new];
     g_frameLock = [NSLock new];
-    g_floatVC = [VCamFloatVC new]; // für Tap-Target
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         wsServerThread();
@@ -440,9 +315,5 @@ static void setupFloatingCircle(void) {
             usleep(2000);
         }
     });
-    // UI nach 5 Sekunden Verzögerung zeigen (SpringBoard muss erst voll starten)
-    vlog(@"[VCamUSB] %ctor fertig, UI kommt in 5s");
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-        setupFloatingCircle();
-    });
+    vlog(@"[VCamUSB] bereit — Volume-Up drücken für Menü");
 }
