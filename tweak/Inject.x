@@ -183,29 +183,136 @@ static void pumpDecoder(void) {
 }
 
 // ---------------------------------------------------------------- Frame-Swap
-static CMSampleBufferRef buildSwapSampleBuffer(void) {
+// Ziel: echten 1440x1080 @ 420f-Buffer mit IOSurface erzeugen, Decoderframe
+// (1280x720) stride-aware skalieren, Color-Attachments vom Original übertragen.
+
+static CVPixelBufferPoolRef g_targetPool = NULL;
+static size_t g_targetW = 1440, g_targetH = 1080;
+
+static _Atomic int64_t g_scaledCount = 0;
+
+static void ensureTargetPool(void) {
+    if (g_targetPool) return;
+    NSDictionary *attrs = @{
+        (__bridge id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange),
+        (__bridge id)kCVPixelBufferWidthKey: @(g_targetW),
+        (__bridge id)kCVPixelBufferHeightKey: @(g_targetH),
+        (__bridge id)kCVPixelBufferIOSurfacePropertiesKey: @{},
+        (__bridge id)kCVPixelBufferMetalCompatibilityKey: @YES,
+        (__bridge id)kCVPixelBufferBytesPerRowAlignmentKey: @64,
+    };
+    CVPixelBufferPoolCreate(kCFAllocatorDefault, NULL,
+        (__bridge CFDictionaryRef)attrs, (__bridge CFDictionaryRef)attrs, &g_targetPool);
+    if (!g_targetPool) L("Target-Pool FAIL");
+    else L("Target-Pool OK %zux%zu", g_targetW, g_targetH);
+}
+
+// Simple Nearest-Neighbor-Skalierung für NV12 (Y + CbCr bi-planar), stride-aware.
+static void scaleNV12(CVPixelBufferRef src, CVPixelBufferRef dst) {
+    size_t sw = CVPixelBufferGetWidth(src);
+    size_t sh = CVPixelBufferGetHeight(src);
+    size_t dw = CVPixelBufferGetWidth(dst);
+    size_t dh = CVPixelBufferGetHeight(dst);
+    if (!sw || !sh || !dw || !dh) return;
+
+    CVPixelBufferLockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
+    CVPixelBufferLockBaseAddress(dst, 0);
+
+    // Y-Plane
+    const uint8_t *sy = CVPixelBufferGetBaseAddressOfPlane(src, 0);
+    uint8_t *dy = CVPixelBufferGetBaseAddressOfPlane(dst, 0);
+    size_t sYstride = CVPixelBufferGetBytesPerRowOfPlane(src, 0);
+    size_t dYstride = CVPixelBufferGetBytesPerRowOfPlane(dst, 0);
+    for (size_t y = 0; y < dh; y++) {
+        size_t syIdx = (y * sh) / dh;
+        const uint8_t *srow = sy + syIdx * sYstride;
+        uint8_t *drow = dy + y * dYstride;
+        for (size_t x = 0; x < dw; x++) {
+            drow[x] = srow[(x * sw) / dw];
+        }
+    }
+
+    // UV-Plane (CbCr, interleaved, halbe Höhe)
+    const uint8_t *suv = CVPixelBufferGetBaseAddressOfPlane(src, 1);
+    uint8_t *duv = CVPixelBufferGetBaseAddressOfPlane(dst, 1);
+    size_t sUVstride = CVPixelBufferGetBytesPerRowOfPlane(src, 1);
+    size_t dUVstride = CVPixelBufferGetBytesPerRowOfPlane(dst, 1);
+    for (size_t y = 0; y < dh / 2; y++) {
+        size_t syIdx = (y * (sh / 2)) / (dh / 2);
+        const uint8_t *srow = suv + syIdx * sUVstride;
+        uint8_t *drow = duv + y * dUVstride;
+        for (size_t x = 0; x < dw; x++) {
+            drow[x] = srow[(x * sw) / dw];
+        }
+    }
+
+    CVPixelBufferUnlockBaseAddress(dst, 0);
+    CVPixelBufferUnlockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
+}
+
+static void copyColorAttachments(CVPixelBufferRef orig, CVPixelBufferRef fake) {
+    CFArrayRef keys = (__bridge CFArrayRef)@[
+        (__bridge id)kCVImageBufferColorPrimariesKey,
+        (__bridge id)kCVImageBufferTransferFunctionKey,
+        (__bridge id)kCVImageBufferYCbCrMatrixKey,
+        (__bridge id)kCVImageBufferCGColorSpaceKey,
+        (__bridge id)kCVImageBufferChromaLocationTopFieldKey,
+        (__bridge id)kCVImageBufferChromaLocationBottomFieldKey,
+    ];
+    for (id key in (__bridge NSArray *)keys) {
+        CFTypeRef value = CVBufferGetAttachment(orig, (__bridge CFStringRef)key, NULL);
+        if (value) {
+            CVBufferSetAttachment(fake, (__bridge CFStringRef)key, value, kCVAttachmentMode_ShouldPropagate);
+        }
+    }
+}
+
+static CMSampleBufferRef buildSwapSampleBuffer(CMSampleBufferRef original) {
     atomic_fetch_add(&g_buildCalls, 1);
-    CVPixelBufferRef px = NULL;
+    CVPixelBufferRef src = NULL;
     [g_frameLock lock];
-    if (g_latestFrame) px = CVPixelBufferRetain(g_latestFrame);
+    if (g_latestFrame) src = CVPixelBufferRetain(g_latestFrame);
     [g_frameLock unlock];
-    if (!px) return NULL;
+    if (!src) return NULL;
+
+    // Ziel-Dimensionen vom Original ableiten
+    if (original) {
+        CVPixelBufferRef origPB = CMSampleBufferGetImageBuffer(original);
+        if (origPB) {
+            g_targetW = CVPixelBufferGetWidth(origPB);
+            g_targetH = CVPixelBufferGetHeight(origPB);
+        }
+    }
+    ensureTargetPool();
+
+    CVPixelBufferRef out = NULL;
+    OSStatus st = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, g_targetPool, &out);
+    if (st != noErr || !out) { CVPixelBufferRelease(src); return NULL; }
+
+    scaleNV12(src, out);
+    CVPixelBufferRelease(src);
+
+    if (original) {
+        CVPixelBufferRef origPB = CMSampleBufferGetImageBuffer(original);
+        if (origPB) copyColorAttachments(origPB, out);
+    }
 
     CMFormatDescriptionRef fmt = NULL;
-    OSStatus st = CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, px, &fmt);
-    if (st != noErr || !fmt) { CVPixelBufferRelease(px); return NULL; }
+    st = CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, out, &fmt);
+    if (st != noErr || !fmt) { CVPixelBufferRelease(out); return NULL; }
 
     CMSampleTimingInfo timing = {
-        .duration = CMTimeMake(1, 30),
-        .presentationTimeStamp = CMTimeMake((int64_t)atomic_load(&g_swapCount), 30),
+        .duration = original ? CMSampleBufferGetDuration(original) : CMTimeMake(1, 30),
+        .presentationTimeStamp = original ? CMSampleBufferGetPresentationTimeStamp(original) : CMTimeMake((int64_t)atomic_load(&g_swapCount), 30),
         .decodeTimeStamp = kCMTimeInvalid,
     };
     CMSampleBufferRef sb = NULL;
-    st = CMSampleBufferCreateReadyWithImageBuffer(kCFAllocatorDefault, px, fmt, &timing, &sb);
+    st = CMSampleBufferCreateReadyWithImageBuffer(kCFAllocatorDefault, out, fmt, &timing, &sb);
     CFRelease(fmt);
-    CVPixelBufferRelease(px);
+    CVPixelBufferRelease(out);
     if (st != noErr || !sb) return NULL;
     atomic_fetch_add(&g_swapCount, 1);
+    atomic_fetch_add(&g_scaledCount, 1);
     return sb;
 }
 
@@ -216,7 +323,7 @@ static CMSampleBufferRef buildSwapSampleBuffer(void) {
 %hook FigCaptureClientSessionMonitor
 - (void)emitSampleBuffer:(id)sampleBuffer {
     atomic_fetch_add(&g_emitCalls, 1);
-    CMSampleBufferRef fake = buildSwapSampleBuffer();
+    CMSampleBufferRef fake = buildSwapSampleBuffer((__bridge CMSampleBufferRef)sampleBuffer);
     if (fake) {
         %orig((__bridge id)fake);
         CFRelease(fake);
@@ -228,7 +335,7 @@ static CMSampleBufferRef buildSwapSampleBuffer(void) {
 
 - (void)sendMediaServerdSampleAtPoint:(id)sampleBuffer {
     atomic_fetch_add(&g_sendCalls, 1);
-    CMSampleBufferRef fake = buildSwapSampleBuffer();
+    CMSampleBufferRef fake = buildSwapSampleBuffer((__bridge CMSampleBufferRef)sampleBuffer);
     if (fake) {
         %orig((__bridge id)fake);
         CFRelease(fake);
@@ -266,7 +373,7 @@ static _Atomic int64_t g_origHeight = 0;
         }
     }
 
-    CMSampleBufferRef fake = buildSwapSampleBuffer();
+    CMSampleBufferRef fake = buildSwapSampleBuffer((__bridge CMSampleBufferRef)sampleBuffer);
     if (fake) {
         %orig((__bridge id)fake);
         CFRelease(fake);
@@ -315,10 +422,12 @@ static void statusServerThread(void) {
             (unsigned long long)atomic_load(&g_hasLatestFrame),
             (unsigned long long)atomic_load(&g_vtSessionAttempts),
             (long long)atomic_load(&g_vtSessionError));
-        int fw = snprintf(msg + w, sizeof(msg) - w, " origFmt=0x%08x origSize=%lldx%lld\n",
+        int fw = snprintf(msg + w, sizeof(msg) - w, " origFmt=0x%08x origSize=%lldx%lld scaled=%llu target=%zux%zu\n",
             (unsigned)(long long)atomic_load(&g_origPixelFormat),
             (long long)atomic_load(&g_origWidth),
-            (long long)atomic_load(&g_origHeight));
+            (long long)atomic_load(&g_origHeight),
+            (unsigned long long)atomic_load(&g_scaledCount),
+            g_targetW, g_targetH);
         if (fw > 0) w += fw;
         if (g_methodDump[0]) {
             int mw = snprintf(msg + w, sizeof(msg) - w, "BW: %s\n", g_methodDump);
