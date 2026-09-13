@@ -159,31 +159,35 @@ static void *hubClientThread(void *arg) {
     return NULL;
 }
 
-static void hubServerThread(void) {
-    // Status-Server (Port 8768): liefert UI-Diagnose als Klartext
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        int srv2 = socket(AF_INET, SOCK_STREAM, 0);
-        int one2 = 1;
-        setsockopt(srv2, SOL_SOCKET, SO_REUSEADDR, &one2, sizeof(one2));
-        struct sockaddr_in a2 = {0};
-        a2.sin_family = AF_INET;
-        a2.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        a2.sin_port = htons(8768);
-        if (bind(srv2, (struct sockaddr *)&a2, sizeof(a2)) < 0) { close(srv2); return; }
-        listen(srv2, 4);
-        L("Status-Server auf 127.0.0.1:8768");
-        while (1) {
-            int c = accept(srv2, NULL, NULL);
-            if (c < 0) continue;
-            char msg[256];
-            snprintf(msg, sizeof(msg),
-                "overlayCalls=%d overlayCreated=%d window=%p clients=%d\n",
-                g_overlayCalls, g_overlayCreated, g_overlayWindow, g_clientCount);
-            send(c, msg, strlen(msg), 0);
-            close(c);
-        }
-    });
+static void statusServerThread(void) {
+    int srv2 = socket(AF_INET, SOCK_STREAM, 0);
+    if (srv2 < 0) { L("status socket fail: %s", strerror(errno)); return; }
+    int one2 = 1;
+    setsockopt(srv2, SOL_SOCKET, SO_REUSEADDR, &one2, sizeof(one2));
+    struct sockaddr_in a2 = {0};
+    a2.sin_family = AF_INET;
+    a2.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a2.sin_port = htons(8768);
+    if (bind(srv2, (struct sockaddr *)&a2, sizeof(a2)) < 0) {
+        L("status bind fail: %s", strerror(errno));
+        close(srv2);
+        return;
+    }
+    if (listen(srv2, 4) < 0) { close(srv2); return; }
+    L("Status-Server auf 127.0.0.1:8768");
+    while (1) {
+        int c = accept(srv2, NULL, NULL);
+        if (c < 0) continue;
+        char msg[256];
+        snprintf(msg, sizeof(msg),
+            "overlayCalls=%d overlayCreated=%d window=%p clients=%d\n",
+            g_overlayCalls, g_overlayCreated, g_overlayWindow, g_clientCount);
+        send(c, msg, strlen(msg), 0);
+        close(c);
+    }
+}
 
+static void hubServerThread(void) {
     int srv = socket(AF_INET, SOCK_STREAM, 0);
     if (srv < 0) { L("socket fail: %s", strerror(errno)); return; }
     int one = 1;
@@ -244,9 +248,12 @@ static void vcamhub_init(void) {
     L("ctor in %@ (pid=%d)", proc, getpid());
     if (![proc isEqualToString:@"SpringBoard"]) return;
 
-    // WS-Server sofort (Hintergrund-Thread)
+    // WS-Server + Status-Server (getrennte Hintergrund-Threads)
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         hubServerThread();
+    });
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        statusServerThread();
     });
 
     // Overlay via Notification (LordVCAM-Muster)
