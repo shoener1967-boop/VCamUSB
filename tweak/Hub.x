@@ -178,10 +178,15 @@ static void statusServerThread(void) {
     while (1) {
         int c = accept(srv2, NULL, NULL);
         if (c < 0) continue;
-        char msg[256];
+        char msg[512];
         snprintf(msg, sizeof(msg),
-            "overlayCalls=%d overlayCreated=%d window=%p clients=%d\n",
-            g_overlayCalls, g_overlayCreated, g_overlayWindow, g_clientCount);
+            "overlayCalls=%d overlayCreated=%d window=%p clients=%d "
+            "windowScene=%p screen=%p root=%p hidden=%d\n",
+            g_overlayCalls, g_overlayCreated, g_overlayWindow, g_clientCount,
+            g_overlayWindow ? (void *)g_overlayWindow.windowScene : NULL,
+            g_overlayWindow ? (void *)g_overlayWindow.screen : NULL,
+            g_overlayWindow ? (void *)g_overlayWindow.rootViewController : NULL,
+            g_overlayWindow ? (int)g_overlayWindow.hidden : -1);
         send(c, msg, strlen(msg), 0);
         close(c);
     }
@@ -215,30 +220,55 @@ static void hubServerThread(void) {
 }
 
 // ---------------------------------------------------------------- Overlay (Minimalprobe)
+static UIWindowScene *ActiveScene(void) {
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        UIWindowScene *ws = (UIWindowScene *)scene;
+        if (ws.activationState == UISceneActivationStateForegroundActive ||
+            ws.activationState == UISceneActivationStateForegroundInactive) {
+            return ws;
+        }
+    }
+    // Fallback: Scene eines sichtbaren Fensters
+    for (UIWindow *w in [UIApplication sharedApplication].windows) {
+        if (!w.hidden && w.alpha > 0.0 && w.windowScene != nil) return w.windowScene;
+    }
+    return nil;
+}
+
 static void showOverlay(void) {
     g_overlayCalls++;
     if (g_overlayWindow != nil) return;   // idempotent
 
-    CGRect frame = [UIScreen mainScreen].bounds;
-    L("screen=%@", NSStringFromCGRect(frame));
+    UIWindowScene *scene = ActiveScene();
+    if (scene != nil) {
+        g_overlayWindow = [[UIWindow alloc] initWithWindowScene:scene];
+    } else {
+        g_overlayWindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+    }
 
-    g_overlayWindow = [[UIWindow alloc] initWithFrame:frame];
-    g_overlayWindow.windowLevel = UIWindowLevelAlert + 100.0;
-    g_overlayWindow.backgroundColor = [UIColor clearColor];
-    g_overlayWindow.alpha = 1.0;
-    g_overlayWindow.hidden = NO;
-    g_overlayWindow.userInteractionEnabled = YES;
+    UIViewController *vc = [UIViewController new];
+    vc.view.backgroundColor = [UIColor clearColor];
 
-    // Probe: rotes Quadrat (diagnostisch — kein runder Kreis, kein Schatten)
+    // Probe: rotes Quadrat (diagnostisch)
     UIView *probe = [[UIView alloc] initWithFrame:CGRectMake(30, 100, 100, 100)];
     probe.backgroundColor = [UIColor redColor];
     probe.userInteractionEnabled = YES;
-    [g_overlayWindow addSubview:probe];
+    [vc.view addSubview:probe];
+
+    g_overlayWindow.rootViewController = vc;
+    g_overlayWindow.windowLevel = UIWindowLevelAlert + 1.0;
+    g_overlayWindow.alpha = 1.0;
+    g_overlayWindow.hidden = NO;
+    g_overlayWindow.userInteractionEnabled = YES;
+    [g_overlayWindow makeKeyAndVisible];
 
     g_overlayCreated = 1;
-    L("overlay erstellt window=%p hidden=%d alpha=%f level=%f frame=%@",
-      g_overlayWindow, g_overlayWindow.hidden, g_overlayWindow.alpha,
-      g_overlayWindow.windowLevel, NSStringFromCGRect(g_overlayWindow.frame));
+    L("overlay: scene=%p windowScene=%p screen=%p hidden=%d alpha=%f level=%f frame=%@ root=%p sceneWindows=%lu",
+      scene, g_overlayWindow.windowScene, g_overlayWindow.screen,
+      g_overlayWindow.hidden, g_overlayWindow.alpha, g_overlayWindow.windowLevel,
+      NSStringFromCGRect(g_overlayWindow.frame), g_overlayWindow.rootViewController,
+      (unsigned long)scene.windows.count);
 }
 
 // ---------------------------------------------------------------- Entry
