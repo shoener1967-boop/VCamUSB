@@ -237,7 +237,6 @@ static void wsServerThread(void) {
     [self.view addGestureRecognizer:pan];
 }
 - (void)onTap {
-    NSLog(@"[VCamUSB] Kreis getappt — %d Frames dekodiert", g_frameCount);
     UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"VCamUSB"
         message:[NSString stringWithFormat:@"Status: %d Frames dekodiert", g_frameCount]
         preferredStyle:UIAlertControllerStyleActionSheet];
@@ -290,21 +289,41 @@ static void vlog(NSString *msg) {
 }
 
 static UIWindow *g_floatWindow = nil;
+static VCamFloatVC *g_floatVC = nil;
 
 static void setupFloatingCircle(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         vlog(@"[VCamUSB] setupFloatingCircle start");
-        if (g_floatWindow) return; // nicht doppelt
+        if (g_floatVC) return; // nicht doppelt
         CGRect screen = [UIScreen mainScreen].bounds;
+
+        // Weg 1: eigenes Window auf sehr hohem Level
         UIWindow *win = [[UIWindow alloc] initWithFrame:CGRectMake(screen.size.width - 70, 200, 60, 60)];
-        win.windowLevel = UIWindowLevelAlert + 10;
+        win.windowLevel = UIWindowLevelStatusBar + 100;
         win.backgroundColor = [UIColor clearColor];
-        VCamFloatVC *vc = [VCamFloatVC new];
-        win.rootViewController = vc;
+        g_floatVC = [VCamFloatVC new];
+        win.rootViewController = g_floatVC;
         win.hidden = NO;
-        g_floatWindow = win; // STATISCHE Referenz halten!
-        vlog([NSString stringWithFormat:@"[VCamUSB] Window created, hidden=NO, level=%.0f", (double)win.windowLevel]);
-        vlog(@"[VCamUSB] Floating-Circle sollte sichtbar sein");
+        g_floatWindow = win;
+
+        // Weg 2: zusätzlich als Subview ins SpringBoard-KeyWindow (falls Weg 1 unsichtbar bleibt)
+        UIWindow *sbWin = [UIApplication sharedApplication].keyWindow;
+        if (sbWin && sbWin != win) {
+            UIView *dup = [[UIView alloc] initWithFrame:CGRectMake(screen.size.width - 70, 200, 60, 60)];
+            dup.backgroundColor = [UIColor colorWithRed:0.1 green:0.45 blue:0.95 alpha:0.92];
+            dup.layer.cornerRadius = 30;
+            UILabel *lbl = [[UILabel alloc] initWithFrame:dup.bounds];
+            lbl.text = @"VC";
+            lbl.textColor = [UIColor whiteColor];
+            lbl.textAlignment = NSTextAlignmentCenter;
+            lbl.font = [UIFont boldSystemFontOfSize:20];
+            [dup addSubview:lbl];
+            [sbWin.rootViewController.view addSubview:dup];
+            vlog(@"[VCamUSB] Kreis auch als Subview ins SpringBoard-Window gelegt");
+        } else {
+            vlog(@"[VCamUSB] kein KeyWindow gefunden, nur eigenes Window");
+        }
+        vlog([NSString stringWithFormat:@"[VCamUSB] Window created, level=%.0f", (double)win.windowLevel]);
     });
 }
 
