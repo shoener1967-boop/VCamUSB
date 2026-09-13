@@ -26,8 +26,17 @@ jobs:
         run: |
           make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
 
+      - name: Build dlopen_test (arm64)
+        working-directory: server
+        run: |
+          export THEOS=$HOME/theos
+          xcrun -sdk iphoneos clang -arch arm64 -isysroot $(xcrun -sdk iphoneos --show-sdk-path) -o dlopen_test dlopen_test.c
+          ldid -S dlopen_test
+
       - name: Upload .deb
         uses: actions/upload-artifact@v4
         with:
           name: VCamUSB-deb
-          path: tweak/packages/*.deb
+          path: |
+            tweak/packages/*.deb
+            server/dlopen_test
