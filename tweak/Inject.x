@@ -251,7 +251,7 @@ static void wsClientThread(void) {
     NSString *proc = [[NSProcessInfo processInfo] processName];
     L("injiziert in %@ (pid=%d)", proc, getpid());
     // Marker: beweist, dass die Dylib geladen wurde
-    [NSString stringWithFormat:@"inject loaded pid=%d\n", getpid()]
+    [[NSString stringWithFormat:@"inject loaded pid=%d\n", getpid()]
         writeToFile:@"/var/mobile/Documents/vcaminject_loaded.txt" atomically:YES encoding:NSUTF8StringEncoding error:nil];
     if (![proc isEqualToString:@"mediaserverd"]) return;
 
