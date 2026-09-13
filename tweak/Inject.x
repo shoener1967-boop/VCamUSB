@@ -18,6 +18,7 @@
 #import <CoreMedia/CoreMedia.h>
 #import <VideoToolbox/VideoToolbox.h>
 #import <substrate.h>
+#import <objc/runtime.h>
 #import <sys/socket.h>
 #import <netinet/in.h>
 #import <arpa/inet.h>
@@ -363,11 +364,39 @@ static void wsClientThread(void) {
     }
 }
 
+// ---------------------------------------------------------------- Methoden-Diagnose
+static void logMethodsOfClass(Class cls) {
+    if (!cls) return;
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList(cls, &count);
+    char buf[4096];
+    size_t off = 0;
+    buf[0] = 0;
+    for (unsigned int i = 0; i < count && off < sizeof(buf) - 200; i++) {
+        SEL sel = method_getName(methods[i]);
+        const char *name = sel_getName(sel);
+        if (strstr(name, "ample") || strstr(name, "emit") || strstr(name, "utput")
+            || strstr(name, "eliver") || strstr(name, "endSample")) {
+            int w = snprintf(buf + off, sizeof(buf) - off, "%s; ", name);
+            if (w > 0) off += w;
+        }
+    }
+    if (methods) free(methods);
+    L("BWNodeOutput-Methoden: %s", buf[0] ? buf : "(keine)");
+}
+
 // ---------------------------------------------------------------- ctor
 %ctor {
     NSString *proc = [[NSProcessInfo processInfo] processName];
     L("injiziert in %@ (pid=%d)", proc, getpid());
     if (![proc isEqualToString:@"mediaserverd"]) return;
+
+    // Methoden-Diagnose (einmalig nach kurzem Delay, damit Klassen geladen sind)
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        logMethodsOfClass(NSClassFromString(@"BWNodeOutput"));
+        logMethodsOfClass(NSClassFromString(@"FigCaptureClientSessionMonitor"));
+    });
 
     g_nalQueue = [NSMutableArray array];
     g_queueLock = [NSLock new];
