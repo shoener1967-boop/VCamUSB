@@ -60,12 +60,19 @@ def main():
     print(run("/var/jb/usr/bin/dpkg -i " + remote))
     print("[install] Dateien:")
     print(run("ls -la /var/jb/Library/MobileSubstrate/DynamicLibraries/ | grep -i vcam"))
-    # roothide: AutoPatch-Symlinks für BEIDE Dylibs (sonst lädt ElleKit sie NICHT!)
-    print("[install] roothide-Patch-Symlinks...")
-    print(run("ln -sf /usr/lib/DynamicPatches/AutoPatches.dylib "
-              "/var/jb/Library/MobileSubstrate/DynamicLibraries/VCamHub.dylib.roothidepatch && "
-              "ln -sf /usr/lib/DynamicPatches/AutoPatches.dylib "
-              "/var/jb/Library/MobileSubstrate/DynamicLibraries/VCamInject.dylib.roothidepatch && echo patch-ok"))
+    # KRITISCH: die .roothidepatch-Symlinks ENTFERNEN! (PatchLoader würde sonst
+    # AutoPatches.dylib statt unserer Dylib laden!)
+    print("[install] entferne falsche .roothidepatch-Symlinks...")
+    print(run("rm -f /var/jb/Library/MobileSubstrate/DynamicLibraries/VCamHub.dylib.roothidepatch "
+              "/var/jb/Library/MobileSubstrate/DynamicLibraries/VCamInject.dylib.roothidepatch "
+              "/var/jb/usr/lib/TweakInject/VCamHub.dylib.roothidepatch "
+              "/var/jb/usr/lib/TweakInject/VCamInject.dylib.roothidepatch && echo links-weg"))
+    # Owner wie LordVCAM: mobile:staff + .sig-Dateien
+    print("[install] Owner + .sig-Dateien (LordVCAM-Schema)...")
+    print(run("chown mobile:staff /var/jb/usr/lib/TweakInject/VCamHub.dylib "
+              "/var/jb/usr/lib/TweakInject/VCamInject.dylib && "
+              "echo -n 'aHRqdGNjbw==' > /var/jb/usr/lib/TweakInject/VCamHub.dylib.sig && "
+              "echo -n 'aHRqdGNjbw==' > /var/jb/usr/lib/TweakInject/VCamInject.dylib.sig && echo sig-ok"))
     # mediaserverd neu starten (nicht nur SpringBoard!)
     print("[install] starte mediaserverd neu...")
     print(run("/var/jb/usr/bin/killall -9 mediaserverd 2>/dev/null; sleep 1; echo msd-ok"))
