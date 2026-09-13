@@ -202,7 +202,7 @@ static void ensureTargetPool(void) {
         (__bridge id)kCVPixelBufferBytesPerRowAlignmentKey: @64,
     };
     CVPixelBufferPoolCreate(kCFAllocatorDefault, NULL,
-        (__bridge CFDictionaryRef)attrs, (__bridge CFDictionaryRef)attrs, &g_targetPool);
+        (__bridge CFDictionaryRef)attrs, &g_targetPool);
     if (!g_targetPool) L("Target-Pool FAIL");
     else L("Target-Pool OK %zux%zu", g_targetW, g_targetH);
 }
