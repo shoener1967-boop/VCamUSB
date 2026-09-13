@@ -267,8 +267,8 @@ static void statusServerThread(void) {
     while (1) {
         int c = accept(srv, NULL, NULL);
         if (c < 0) continue;
-        char msg[1024];
-        snprintf(msg, sizeof(msg),
+        char msg[5120];
+        int w = snprintf(msg, sizeof(msg),
             "rxNal=%llu sps=%llu pps=%llu idr=%llu "
             "formatDesc=%llu submit=%llu output=%llu errors=%llu "
             "emit=%llu send=%llu build=%llu swap=%llu orig=%llu hasFrame=%llu "
@@ -289,7 +289,11 @@ static void statusServerThread(void) {
             (unsigned long long)atomic_load(&g_hasLatestFrame),
             (unsigned long long)atomic_load(&g_vtSessionAttempts),
             (long long)atomic_load(&g_vtSessionError));
-        send(c, msg, strlen(msg), 0);
+        if (g_methodDump[0]) {
+            int mw = snprintf(msg + w, sizeof(msg) - w, "methods: %s\n", g_methodDump);
+            if (mw > 0) w += mw;
+        }
+        send(c, msg, w, 0);
         close(c);
     }
 }
@@ -365,24 +369,29 @@ static void wsClientThread(void) {
 }
 
 // ---------------------------------------------------------------- Methoden-Diagnose
-static void logMethodsOfClass(Class cls) {
-    if (!cls) return;
+static char g_methodDump[4096] = {0};
+
+static void logMethodsOfClass(Class cls, const char *className) {
+    if (!cls) {
+        snprintf(g_methodDump, sizeof(g_methodDump), "%s: KLASSE FEHLT", className);
+        return;
+    }
     unsigned int count = 0;
     Method *methods = class_copyMethodList(cls, &count);
-    char buf[4096];
     size_t off = 0;
-    buf[0] = 0;
-    for (unsigned int i = 0; i < count && off < sizeof(buf) - 200; i++) {
+    g_methodDump[0] = 0;
+    off += snprintf(g_methodDump + off, sizeof(g_methodDump) - off, "%s: ", className);
+    for (unsigned int i = 0; i < count && off < sizeof(g_methodDump) - 200; i++) {
         SEL sel = method_getName(methods[i]);
         const char *name = sel_getName(sel);
         if (strstr(name, "ample") || strstr(name, "emit") || strstr(name, "utput")
             || strstr(name, "eliver") || strstr(name, "endSample")) {
-            int w = snprintf(buf + off, sizeof(buf) - off, "%s; ", name);
+            int w = snprintf(g_methodDump + off, sizeof(g_methodDump) - off, "%s; ", name);
             if (w > 0) off += w;
         }
     }
     if (methods) free(methods);
-    L("BWNodeOutput-Methoden: %s", buf[0] ? buf : "(keine)");
+    L("Methoden von %s erfasst", className);
 }
 
 // ---------------------------------------------------------------- ctor
@@ -394,8 +403,8 @@ static void logMethodsOfClass(Class cls) {
     // Methoden-Diagnose (einmalig nach kurzem Delay, damit Klassen geladen sind)
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        logMethodsOfClass(NSClassFromString(@"BWNodeOutput"));
-        logMethodsOfClass(NSClassFromString(@"FigCaptureClientSessionMonitor"));
+        logMethodsOfClass(NSClassFromString(@"BWNodeOutput"), "BWNodeOutput");
+        logMethodsOfClass(NSClassFromString(@"FigCaptureClientSessionMonitor"), "FigCaptureClientSessionMonitor");
     });
 
     g_nalQueue = [NSMutableArray array];
