@@ -1,36 +1,48 @@
-// VCamUSB — virtuelle Kamera über USB (Phase 2)
+// VCamInject — virtuelle Kamera für mediaserverd (LordVCAM/chmp4-Muster)
 //
-// Läuft NUR in SpringBoard (kein mediaserverd-Injection → kein Crash):
-//   - Schwebender Kreis (draggable), Tap öffnet Menü: USB / WLAN / Album
-//   - WS-Server auf 127.0.0.1:8767, empfängt H.264 vom PC
-//   - H.264-Decode via VideoToolbox
+// mediaserverd ist der zentrale Kamera-Daemon: ALLE Apps (Camera, Snapchat,
+// TikTok, WhatsApp ...) beziehen ihre Kamera-Frames von hier. Diese Dylib:
 //
-// Kein Login, keine Lizenz, keine Cloud. iOS 15+ (16.7 roothide + 18.x Relaxin).
+//   1. läuft einen WebSocket-SERVER auf 127.0.0.1:8767 (PC verbindet sich
+//      übers USB-Kabel via usbmuxd-Tunnel — KEIN SSH, KEIN iproxy zur Laufzeit)
+//   2. empfängt H.264-Annex-B vom PC (OBS Virtual Camera / Video / Bild)
+//   3. decodiert via VideoToolbox zu CVPixelBuffer (420v — exakt das
+//      Kamera-Format, das die Capture-Pipeline erwartet)
+//   4. ersetzt in FigCaptureClientSessionMonitor die echten Frames durch
+//      unsere — genau die Klasse/Selektoren, die in LordVCAMs AVServicesd.dylib
+//      stehen (emitSampleBuffer: / sendMediaServerdSampleAtPoint:)
+//
+// Diagnose: os_log → am Gerät via  log show --predicate 'process == "mediaserverd"'
 
 #import <Foundation/Foundation.h>
-#import <UIKit/UIKit.h>
 #import <CoreVideo/CoreVideo.h>
 #import <CoreMedia/CoreMedia.h>
 #import <VideoToolbox/VideoToolbox.h>
-#import <AVFoundation/AVFoundation.h>
+#import <substrate.h>
 #import <sys/socket.h>
 #import <netinet/in.h>
 #import <arpa/inet.h>
 #import <CommonCrypto/CommonDigest.h>
-#import <substrate.h>
+#import <os/log.h>
+#import <objc/runtime.h>
 
 #define WS_PORT 8767
-#define MAX_PENDING (16*1024*1024)
 
+static os_log_t LOG = NULL;
+#define L(FMT, ...) do { if (!LOG) LOG = os_log_create("com.shosh.vcaminject", "inject"); \
+    os_log(LOG, "%s: " FMT, __func__, ##__VA_ARGS__); } while (0)
+
+// ---------------------------------------------------------------- Globals
 static NSMutableArray<NSData *> *g_nalQueue = nil;
 static NSLock *g_queueLock = nil;
 static VTDecompressionSessionRef g_vtSession = NULL;
 static CMFormatDescriptionRef g_fmtDesc = NULL;
 static CVPixelBufferRef g_latestFrame = NULL;
 static NSLock *g_frameLock = nil;
-static int g_frameCount = 0;
+static int g_swapCount = 0;
+static int g_passCount = 0;
 
-// ---------------------------------------------------------------- WS Util
+// ---------------------------------------------------------------- WS Handshake
 static NSString *wsAcceptKey(NSString *key) {
     NSString *magic = [key stringByAppendingString:@"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"];
     unsigned char digest[CC_SHA1_DIGEST_LENGTH];
@@ -42,7 +54,7 @@ static void enqueueNal(NSData *nal) {
     if (nal.length < 4) return;
     [g_queueLock lock];
     [g_nalQueue addObject:nal];
-    if (g_nalQueue.count > 256) [g_nalQueue removeObjectsInRange:NSMakeRange(0, g_nalQueue.count - 256)];
+    if (g_nalQueue.count > 128) [g_nalQueue removeObjectsInRange:NSMakeRange(0, g_nalQueue.count - 128)];
     [g_queueLock unlock];
 }
 
@@ -65,7 +77,6 @@ static void decompressionOutputCallback(void *refCon, void *srcRef,
     [g_frameLock lock];
     if (g_latestFrame) CVPixelBufferRelease(g_latestFrame);
     g_latestFrame = CVPixelBufferRetain(imageBuffer);
-    g_frameCount++;
     [g_frameLock unlock];
 }
 
@@ -85,9 +96,13 @@ static void pumpDecoder(void) {
             if (sps.length && pps.length) {
                 const uint8_t *ptrs[2] = { (const uint8_t *)sps.bytes, (const uint8_t *)pps.bytes };
                 size_t sizes[2] = { sps.length, pps.length };
-                CMVideoFormatDescriptionCreateFromH264ParameterSets(
+                OSStatus st = CMVideoFormatDescriptionCreateFromH264ParameterSets(
                     kCFAllocatorDefault, 2, ptrs, sizes, 4, &g_fmtDesc);
-                if (g_fmtDesc) NSLog(@"[VCamUSB] FormatDescription OK");
+                if (st == noErr && g_fmtDesc) {
+                    size_t dw = 0, dh = 0;
+                    CMVideoDimensions dims = CMVideoFormatDescriptionGetDimensions(g_fmtDesc);
+                    L("FormatDescription OK %dx%d", (int)dims.width, (int)dims.height);
+                }
             }
             return;
         }
@@ -97,12 +112,12 @@ static void pumpDecoder(void) {
             cb.decompressionOutputRefCon = NULL;
             NSDictionary *attrs = @{
                 (__bridge id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
-                (__bridge id)kCVPixelBufferMetalCompatibilityKey: @YES,
+                (__bridge id)kCVPixelBufferIOSurfacePropertiesKey: @{},
             };
             OSStatus st = VTDecompressionSessionCreate(kCFAllocatorDefault, g_fmtDesc, NULL,
                 (__bridge CFDictionaryRef)attrs, &cb, &g_vtSession);
             if (st != noErr || !g_vtSession) return;
-            NSLog(@"[VCamUSB] Decode-Session OK");
+            L("Decode-Session OK");
         }
         static const uint8_t sc[4] = { 0, 0, 0, 1 };
         NSMutableData *block = [NSMutableData dataWithBytes:sc length:4];
@@ -113,8 +128,8 @@ static void pumpDecoder(void) {
         if (!bb) return;
         char *dst = NULL;
         size_t lenAtOffset = 0, totalLen = 0;
-        OSStatus dpst = CMBlockBufferGetDataPointer(bb, 0, &lenAtOffset, &totalLen, &dst);
-        if (dpst != kCMBlockBufferNoErr || !dst || lenAtOffset < block.length) {
+        if (CMBlockBufferGetDataPointer(bb, 0, &lenAtOffset, &totalLen, &dst) != kCMBlockBufferNoErr
+            || !dst || lenAtOffset < block.length) {
             CFRelease(bb);
             return;
         }
@@ -128,10 +143,66 @@ static void pumpDecoder(void) {
     }
 }
 
+// ---------------------------------------------------------------- Frame-Swap
+// Baut aus unserem 420v-Frame ein CMSampleBuffer (exakt Kamera-Format) und
+// reicht es statt des echten Frames an die Capture-Pipeline weiter.
+static CMSampleBufferRef buildSwapSampleBuffer(void) {
+    CVPixelBufferRef px = NULL;
+    [g_frameLock lock];
+    if (g_latestFrame) px = CVPixelBufferRetain(g_latestFrame);
+    [g_frameLock unlock];
+    if (!px) return NULL;
+
+    CMFormatDescriptionRef fmt = NULL;
+    OSStatus st = CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, px, &fmt);
+    if (st != noErr || !fmt) { CVPixelBufferRelease(px); return NULL; }
+
+    CMSampleTimingInfo timing = {
+        .duration = CMTimeMake(1, 30),
+        .presentationTimeStamp = CMTimeMake(g_swapCount, 30),
+        .decodeTimeStamp = kCMTimeInvalid,
+    };
+    CMSampleBufferRef sb = NULL;
+    st = CMSampleBufferCreateReadyWithImageBuffer(kCFAllocatorDefault, px, fmt, &timing, &sb);
+    CFRelease(fmt);
+    CVPixelBufferRelease(px);
+    if (st != noErr || !sb) return NULL;
+    return sb;
+}
+
+// ---------------------------------------------------------------- FigCapture-Hook
+// Genau die Selektoren aus LordVCAMs AVServicesd.dylib.
+%hook FigCaptureClientSessionMonitor
+- (void)emitSampleBuffer:(id)sampleBuffer {
+    CMSampleBufferRef fake = buildSwapSampleBuffer();
+    if (fake) {
+        g_swapCount++;
+        %orig(fake);
+        CFRelease(fake);
+        if (g_swapCount % 300 == 1) L("swap# %d", g_swapCount);
+        return;
+    }
+    g_passCount++;
+    %orig;
+}
+
+- (void)sendMediaServerdSampleAtPoint:(id)sampleBuffer {
+    CMSampleBufferRef fake = buildSwapSampleBuffer();
+    if (fake) {
+        g_swapCount++;
+        %orig(fake);
+        CFRelease(fake);
+        return;
+    }
+    g_passCount++;
+    %orig;
+}
+%end
+
 // ---------------------------------------------------------------- WS Server
 static void wsServerThread(void) {
     int srv = socket(AF_INET, SOCK_STREAM, 0);
-    if (srv < 0) return;
+    if (srv < 0) { L("socket fail: %s", strerror(errno)); return; }
     int one = 1;
     setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
     struct sockaddr_in addr = {0};
@@ -139,26 +210,29 @@ static void wsServerThread(void) {
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = htons(WS_PORT);
     if (bind(srv, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        NSLog(@"[VCamUSB] bind fehlgeschlagen: %s", strerror(errno));
-        close(srv); return;
+        L("bind fail: %s", strerror(errno));
+        close(srv);
+        return;
     }
     if (listen(srv, 4) < 0) { close(srv); return; }
-    NSLog(@"[VCamUSB] WS-Server auf 127.0.0.1:%d", WS_PORT);
+    L("WS-Server auf 127.0.0.1:%d", WS_PORT);
 
     while (1) {
         struct sockaddr_in cli = {0};
         socklen_t clen = sizeof(cli);
         int fd = accept(srv, (struct sockaddr *)&cli, &clen);
         if (fd < 0) continue;
-        uint8_t *buf = malloc(MAX_PENDING);
-        ssize_t n = recv(fd, buf, MAX_PENDING - 1, 0);
+        L("WS-Client verbunden");
+        uint8_t *buf = malloc(16 * 1024 * 1024);
+        ssize_t n = recv(fd, buf, 16 * 1024 * 1024 - 1, 0);
         if (n > 0) {
             buf[n] = 0;
             NSString *req = [NSString stringWithUTF8String:(const char *)buf];
             NSRange keyR = [req rangeOfString:@"Sec-WebSocket-Key: "];
             if (keyR.location != NSNotFound) {
                 NSString *key = [req substringFromIndex:keyR.location + keyR.length];
-                key = [[key componentsSeparatedByString:@"\r\n"].firstObject stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+                key = [[key componentsSeparatedByString:@"\r\n"].firstObject
+                       stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
                 NSString *resp = [NSString stringWithFormat:
                     @"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %@\r\n\r\n",
                     wsAcceptKey(key)];
@@ -180,7 +254,7 @@ static void wsServerThread(void) {
                     }
                     uint8_t mask[4] = {0};
                     if (masked && recv(fd, mask, 4, MSG_WAITALL) != 4) break;
-                    if (plen > MAX_PENDING) break;
+                    if (plen > 16 * 1024 * 1024) break;
                     uint8_t *payload = malloc((size_t)plen);
                     size_t got = 0;
                     while (got < plen) {
@@ -191,7 +265,7 @@ static void wsServerThread(void) {
                     if (got < plen) { free(payload); break; }
                     if (masked) for (uint64_t i = 0; i < plen; i++) payload[i] ^= mask[i & 3];
                     if (opcode == 0x8) { free(payload); break; }
-                    if (opcode == 0x9) { // ping -> pong (sonst killt der Client die Verbindung)
+                    if (opcode == 0x9) {
                         uint8_t pong_hdr[2] = {0x8A, (uint8_t)(plen & 0x7f)};
                         send(fd, pong_hdr, 2, 0);
                         if (plen > 0) send(fd, payload, (int)plen, 0);
@@ -202,9 +276,9 @@ static void wsServerThread(void) {
                         enqueueNal([NSData dataWithBytesNoCopy:payload length:(NSUInteger)plen freeWhenDone:YES]);
                         continue;
                     }
-                    if (opcode == 0x1) {
+                    if (opcode == 0x1) {  // Text = Steuerung/Handshake vom PC
                         NSString *s = [[NSString alloc] initWithBytes:payload length:(NSUInteger)plen encoding:NSUTF8StringEncoding];
-                        if (s) NSLog(@"[VCamUSB] ctrl: %@", s);
+                        L("ctrl: %@", s);
                         continue;
                     }
                     free(payload);
@@ -213,94 +287,15 @@ static void wsServerThread(void) {
         }
         free(buf);
         close(fd);
+        L("WS-Client getrennt");
     }
 }
 
-// Datei-Logging für Diagnose (SpringBoard NSLog ist oft gefiltert)
-static void vlog(NSString *msg) {
-    NSLog(@"%@", msg);
-    @autoreleasepool {
-        NSString *path = @"/var/mobile/Documents/vcam.log";
-        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
-        if (!fh) {
-            [@"" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
-            fh = [NSFileHandle fileHandleForWritingAtPath:path];
-        }
-        [fh seekToEndOfFile];
-        NSString *line = [NSString stringWithFormat:@"%@ %@\n", [NSDate date], msg];
-        [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
-        [fh closeFile];
-    }
-}
-
-// ---------------------------------------------------------------- UI (chmp4-Muster)
-// KEIN eigenes Window, KEIN Fremd-Subview — das war der Crash-Grund.
-// Trigger: Volume-Up-Taste (genau wie chmp4/NetHelper).
-// Menü: UIAlertController, präsentiert über den offiziellen presentViewController-Weg,
-// den SpringBoard selbst verwaltet — kann nicht "weggeräumt" werden.
-
-static int g_mode = 0; // 0=USB, 1=WLAN, 2=Album
-
-static UIWindow *findSBKeyWindow(void) {
-    for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
-        if ([scene isKindOfClass:[UIWindowScene class]]) {
-            for (UIWindow *w in scene.windows) {
-                if (w.isKeyWindow) return w;
-            }
-            if (scene.windows.count > 0) return scene.windows.firstObject;
-        }
-    }
-    return nil;
-}
-
-static NSTimeInterval g_lastVolTrigger = 0;
-
-static void showVCamMenu(void) {
-    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
-    if (now - g_lastVolTrigger < 1.0) return; // Debounce bei Tasten-Wiederholung
-    g_lastVolTrigger = now;
-
-    UIWindow *sbWin = findSBKeyWindow();
-    UIViewController *top = sbWin ? sbWin.rootViewController : nil;
-    while (top && top.presentedViewController) top = top.presentedViewController;
-    if (!top) {
-        vlog(@"[VCamUSB] Kein VC zum Präsentieren gefunden");
-        return;
-    }
-
-    vlog(@"[VCamUSB] Volume-Up gedrückt — Menü öffnen");
-    UIAlertController *menu = [UIAlertController alertControllerWithTitle:@"VCamUSB"
-        message:[NSString stringWithFormat:@"Frames: %d | Modus: %@", g_frameCount,
-            g_mode == 0 ? @"USB" : g_mode == 1 ? @"WLAN" : @"Album"]
-        preferredStyle:UIAlertControllerStyleActionSheet];
-
-    [menu addAction:[UIAlertAction actionWithTitle:@"USB (PC-Server)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a){
-        g_mode = 0; vlog(@"[VCamUSB] Modus: USB");
-    }]];
-    [menu addAction:[UIAlertAction actionWithTitle:@"WLAN (PC-Server)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a){
-        g_mode = 1; vlog(@"[VCamUSB] Modus: WLAN");
-    }]];
-    [menu addAction:[UIAlertAction actionWithTitle:@"Album (Video)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a){
-        g_mode = 2; vlog(@"[VCamUSB] Modus: Album");
-    }]];
-    [menu addAction:[UIAlertAction actionWithTitle:@"Abbrechen" style:UIAlertActionStyleCancel handler:nil]];
-
-    [top presentViewController:menu animated:YES completion:nil];
-}
-
-// Hook auf die Volume-Up-Taste in SpringBoard — genau wie chmp4s NetHelper.dylib
-%hook SBDashBoardLockScreenEnvironment
-- (void)handleVolumeUpButtonPress {
-    %orig;
-    showVCamMenu();
-}
-%end
-
+// ---------------------------------------------------------------- ctor
 %ctor {
     NSString *proc = [[NSProcessInfo processInfo] processName];
-    vlog([NSString stringWithFormat:@"[VCamUSB] injiziert in %@", proc]);
-
-    if (![proc isEqualToString:@"SpringBoard"]) return;
+    L("injiziert in %@ (pid=%d)", proc, getpid());
+    if (![proc isEqualToString:@"mediaserverd"]) return;
 
     g_nalQueue = [NSMutableArray array];
     g_queueLock = [NSLock new];
@@ -312,8 +307,9 @@ static void showVCamMenu(void) {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
         while (1) {
             pumpDecoder();
-            usleep(2000);
+            usleep(2500);
         }
     });
-    vlog(@"[VCamUSB] bereit — Volume-Up drücken für Menü");
+
+    L("bereit — warte auf Frames vom PC");
 }

@@ -360,11 +360,11 @@ class Pipeline:
             out = compose_frame(frame, WIDTH, HEIGHT, self.state["transform"])
             out = apply_filters(out, self.state["filters"])
             self.encoder.send(out)
-            # preview JPEG
+            # preview JPEG (höhere Auflösung + Qualität fürs Dashboard)
             try:
-                small = cv2.resize(out, (480, int(480 * HEIGHT / WIDTH)),
+                small = cv2.resize(out, (960, int(960 * HEIGHT / WIDTH)),
                                    interpolation=cv2.INTER_AREA)
-                ok, jpg = cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                ok, jpg = cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, 85])
                 if ok:
                     with self._jpg_lock:
                         self.latest_jpg = jpg.tobytes()
@@ -402,9 +402,35 @@ class FramePusher:
                             if not chunk:
                                 await asyncio.sleep(0.05)
                                 continue
-                            await ws.send(chunk)
-                            self.state["bytes_sent"] += len(chunk)
-                            self.state["frames_sent"] += 1
+                            # NAL-Grenzen respektieren: jedes NAL einzeln senden
+                            # (der iPhone-Decoder erwartet 1 NAL pro WS-Message)
+                            start = 0
+                            i = 0
+                            n = len(chunk)
+                            while i < n - 3:
+                                if chunk[i] == 0 and chunk[i + 1] == 0:
+                                    if chunk[i + 2] == 1:
+                                        if start < i:
+                                            await ws.send(chunk[start:i])
+                                            self.state["bytes_sent"] += (i - start)
+                                            self.state["frames_sent"] += 1
+                                        start = i + 3
+                                        i += 3
+                                        continue
+                                    elif i + 3 < n and chunk[i + 2] == 0 and chunk[i + 3] == 1:
+                                        if start < i:
+                                            await ws.send(chunk[start:i])
+                                            self.state["bytes_sent"] += (i - start)
+                                            self.state["frames_sent"] += 1
+                                        start = i + 4
+                                        i += 4
+                                        continue
+                                i += 1
+                            if start < n:
+                                await ws.send(chunk[start:n])
+                                self.state["bytes_sent"] += (n - start)
+                                self.state["frames_sent"] += 1
+                            await asyncio.sleep(0.003)
             except Exception as e:
                 self.state["connected"] = False
                 if not self._closed:
