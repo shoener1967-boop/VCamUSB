@@ -240,11 +240,11 @@ static CMSampleBufferRef buildSwapSampleBuffer(void) {
 %end
 
 %hook BWNodeOutput
-- (void)emitSampleBuffer:(CMSampleBufferRef)sampleBuffer {
+- (void)emitSampleBuffer:(id)sampleBuffer {
     atomic_fetch_add(&g_emitCalls, 1);
     CMSampleBufferRef fake = buildSwapSampleBuffer();
     if (fake) {
-        %orig(fake);
+        %orig((__bridge id)fake);
         CFRelease(fake);
         return;
     }
