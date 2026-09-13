@@ -252,6 +252,8 @@ static void vlog(NSString *msg) {
 - (void)onTap;
 @end
 
+static UIWindow *findSBKeyWindow(void);
+
 @implementation VCamFloatVC {
     UIView *_menuView;
     BOOL _menuOpen;
@@ -263,13 +265,15 @@ static void vlog(NSString *msg) {
     self.view = [[UIView alloc] initWithFrame:[UIScreen mainScreen].bounds];
     self.view.backgroundColor = [UIColor clearColor];
 
+    // Plain UIView + Tap-Gesture statt UIButton (UIButton-Actions werden in SB oft verschluckt)
     _circleBtn = [UIButton buttonWithType:UIButtonTypeCustom];
     _circleBtn.frame = CGRectMake(0, 0, 60, 60);
     _circleBtn.layer.cornerRadius = 30;
     _circleBtn.backgroundColor = [UIColor colorWithRed:0.1 green:0.45 blue:0.95 alpha:0.92];
     _circleBtn.titleLabel.font = [UIFont boldSystemFontOfSize:20];
     [_circleBtn setTitle:@"VC" forState:UIControlStateNormal];
-    [_circleBtn addTarget:self action:@selector(onTap) forControlEvents:UIControlEventTouchUpInside];
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(onTap)];
+    [_circleBtn addGestureRecognizer:tap];
     _circleCenter = CGPointMake([UIScreen mainScreen].bounds.size.width - 40, 230);
     _circleBtn.center = _circleCenter;
     [self.view addSubview:_circleBtn];
@@ -290,11 +294,9 @@ static void vlog(NSString *msg) {
     _menuOpen = YES;
     // Menü unterhalb/neben dem Kreis platzieren (clamped an den Screen)
     CGRect screen = [UIScreen mainScreen].bounds;
-    CGFloat mx = _circleBtn.center.x - 125;
-    CGFloat my = _circleBtn.center.y + 40;
-    if (mx < 10) mx = 10;
-    if (mx + 250 > screen.size.width - 10) mx = screen.size.width - 260;
-    if (my + 190 > screen.size.height - 10) my = _circleBtn.center.y - 230;
+    CGFloat mx = screen.size.width - 260;
+    CGFloat my = 270;
+    if (my + 190 > screen.size.height - 10) my = 40;
 
     _menuView = [[UIView alloc] initWithFrame:CGRectMake(mx, my, 250, 180)];
     _menuView.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.95];
@@ -316,7 +318,10 @@ static void vlog(NSString *msg) {
         [b addTarget:self action:@selector(menuAction:) forControlEvents:UIControlEventTouchUpInside];
         [_menuView addSubview:b];
     }
-    [self.view addSubview:_menuView];
+    // Menü DIREKT ins SpringBoard-KeyWindow hängen (da ist es sichtbar)
+    UIWindow *sbWin = findSBKeyWindow();
+    [sbWin.rootViewController.view addSubview:_menuView];
+    [sbWin.rootViewController.view bringSubviewToFront:_menuView];
 }
 
 - (void)menuAction:(UIButton *)sender {
@@ -354,51 +359,64 @@ static void vlog(NSString *msg) {
 
 static VCamWindow *g_floatWindow = nil;
 static VCamFloatVC *g_floatVC = nil;
+static UIView *g_sbBtn = nil;
+
+static UIWindow *findSBKeyWindow(void) {
+    for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if ([scene isKindOfClass:[UIWindowScene class]]) {
+            for (UIWindow *w in scene.windows) {
+                if (w.isKeyWindow) return w;
+            }
+            if (scene.windows.count > 0) return scene.windows.firstObject;
+        }
+    }
+    return nil;
+}
+
+// Watchdog: stellt den Kreis wieder her, falls SpringBoard ihn entfernt
+static void circleWatchdog(void) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        UIWindow *sbWin = findSBKeyWindow();
+        if (sbWin && g_sbBtn && g_sbBtn.superview == nil) {
+            [sbWin.rootViewController.view addSubview:g_sbBtn];
+            [sbWin.rootViewController.view bringSubviewToFront:g_sbBtn];
+            vlog(@"[VCamUSB] Watchdog: Kreis wiederhergestellt");
+        }
+        circleWatchdog();
+    });
+}
 
 static void setupFloatingCircle(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         vlog(@"[VCamUSB] setupFloatingCircle start");
-        if (g_floatVC) return; // nicht doppelt
+        if (g_sbBtn) return; // nicht doppelt
         CGRect screen = [UIScreen mainScreen].bounds;
 
-        // Das eigene Fenster (mit Kreis + Menü-Views drin)
-        VCamWindow *win = [[VCamWindow alloc] initWithFrame:screen];
-        win.windowLevel = UIWindowLevelStatusBar + 100;
-        win.backgroundColor = [UIColor clearColor];
-        g_floatVC = [VCamFloatVC new];
-        win.rootViewController = g_floatVC;
-        win.hidden = NO;
-        g_floatWindow = win;
-
-        // Zusätzlich: Kreis-View direkt ins SpringBoard-KeyWindow hängen
-        // (das war der Weg, der vorher sichtbar funktioniert hat)
-        UIWindow *sbWin = nil;
-        for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if ([scene isKindOfClass:[UIWindowScene class]]) {
-                for (UIWindow *w in scene.windows) {
-                    if (w.isKeyWindow) { sbWin = w; break; }
-                }
-                if (!sbWin && scene.windows.count > 0) sbWin = scene.windows.firstObject;
-                if (sbWin) break;
-            }
-        }
-        if (sbWin) {
-            // kleinen Button als Subview in SB-Root legen
-            UIButton *sbBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-            sbBtn.frame = CGRectMake(screen.size.width - 70, 200, 60, 60);
-            sbBtn.layer.cornerRadius = 30;
-            sbBtn.backgroundColor = [UIColor colorWithRed:0.1 green:0.45 blue:0.95 alpha:0.92];
-            sbBtn.titleLabel.font = [UIFont boldSystemFontOfSize:20];
-            [sbBtn setTitle:@"VC" forState:UIControlStateNormal];
-            // Tap leitet an unseren VC weiter (Menu auf eigenem Window)
-            [sbBtn addTarget:g_floatVC action:@selector(onTap) forControlEvents:UIControlEventTouchUpInside];
-            sbBtn.userInteractionEnabled = YES;
-            [sbWin.rootViewController.view addSubview:sbBtn];
-            vlog(@"[VCamUSB] SB-Button als Subview ins SpringBoard-KeyWindow");
-        } else {
+        UIWindow *sbWin = findSBKeyWindow();
+        if (!sbWin) {
             vlog(@"[VCamUSB] KEIN SpringBoard-KeyWindow gefunden!");
+            // später nochmal versuchen
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+                g_sbBtn = nil;
+                setupFloatingCircle();
+            });
+            return;
         }
-        vlog(@"[VCamUSB] Pass-through-Window + SB-Subview aktiv");
+
+        // Kreis direkt ins SB-KeyWindow — der einzige Weg, der sichtbar funktioniert
+        UIButton *sbBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+        sbBtn.frame = CGRectMake(screen.size.width - 70, 200, 60, 60);
+        sbBtn.layer.cornerRadius = 30;
+        sbBtn.backgroundColor = [UIColor colorWithRed:0.1 green:0.45 blue:0.95 alpha:0.92];
+        sbBtn.titleLabel.font = [UIFont boldSystemFontOfSize:20];
+        [sbBtn setTitle:@"VC" forState:UIControlStateNormal];
+        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:g_floatVC action:@selector(onTap)];
+        [sbBtn addGestureRecognizer:tap];
+        [sbWin.rootViewController.view addSubview:sbBtn];
+        [sbWin.rootViewController.view bringSubviewToFront:sbBtn];
+        g_sbBtn = sbBtn;
+        vlog(@"[VCamUSB] Kreis im SB-KeyWindow platziert + Watchdog gestartet");
+        circleWatchdog();
     });
 }
 
@@ -411,6 +429,7 @@ static void setupFloatingCircle(void) {
     g_nalQueue = [NSMutableArray array];
     g_queueLock = [NSLock new];
     g_frameLock = [NSLock new];
+    g_floatVC = [VCamFloatVC new]; // für Tap-Target
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         wsServerThread();
