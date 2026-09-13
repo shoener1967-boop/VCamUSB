@@ -243,14 +243,15 @@ static void bannerSetup(void) {
 
     g_bannerTarget = [[VCamBannerTarget alloc] init];
 
-    // Eigene UIWindow — unabhängig vom SpringBoard-Window, sehr hoher Level
+    // Eigene UIWindow — sehr hoher Level (über Alert), makeKeyAndVisible nötig
     g_bannerWindow = [[UIWindow alloc] initWithFrame:screen];
-    g_bannerWindow.windowLevel = UIWindowLevelStatusBar + 100.0;
+    g_bannerWindow.windowLevel = 3000.0;
     g_bannerWindow.backgroundColor = [UIColor clearColor];
 
     UIViewController *root = [[UIViewController alloc] init];
     root.view.backgroundColor = [UIColor clearColor];
     g_bannerWindow.rootViewController = root;
+    [g_bannerWindow makeKeyAndVisible];
 
     // Button (kreisförmig)
     g_bannerButton = [UIButton buttonWithType:UIButtonTypeCustom];
@@ -292,7 +293,7 @@ static void bannerSetup(void) {
     [g_infoPanel addSubview:portLabel];
 
     [root.view addSubview:g_infoPanel];
-    [g_bannerWindow setHidden:NO];
+    [g_bannerWindow makeKeyAndVisible];
 
     bannerUpdateStatus();
     L("Banner erstellt");
