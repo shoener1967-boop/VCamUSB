@@ -1,11 +1,17 @@
-// VCamInject — Frame-Swap in mediaserverd (läuft neben VCamHub in SpringBoard)
+// VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
-// Verbindet sich per Loopback-WebSocket (Client!) zum Hub (127.0.0.1:8767),
-// empfängt H.264, decodiert zu CVPixelBuffer (420v — das native Kamera-Format),
-// und ersetzt in FigCaptureClientSessionMonitor die echten Frames.
+// Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
+//           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
 //
-// KEIN bind(), KEIN Server hier — nur connect() als Client, das ist in
-// mediaserverds Sandbox erlaubt (genau wie LordVCAM/chmp4 es machen).
+// TELEMETRIE: Status-Server auf 127.0.0.1:8769 liefert atomare Zähler.
+//   rxNal sps pps idr formatDesc decodeSubmit decodeOutput decodeError
+//   emitCalls sendCalls buildCalls swapCount origCount hasLatestFrame
+//
+// WICHTIG (Decoder-Fix): Der PC sendet rohe NALs OHNE Startcode. Die
+// Format-Description wird als AVCC erstellt (lengthSize=4). Deshalb müssen
+// die Samples ebenfalls AVCC-formatiert sein: [4-Byte-Länge][NAL] — NICHT
+// Annex-B (00 00 00 01). Vorher wurde Annex-B-Startcode an eine AVCC-Desc
+// übergeben → Decoder lieferte nie Frames.
 
 #import <Foundation/Foundation.h>
 #import <CoreVideo/CoreVideo.h>
@@ -15,14 +21,31 @@
 #import <sys/socket.h>
 #import <netinet/in.h>
 #import <arpa/inet.h>
-#import <CommonCrypto/CommonDigest.h>
+#import <stdatomic.h>
 #import <os/log.h>
 
 #define WS_PORT 8767
+#define STATUS_PORT 8769
 
 static os_log_t LOG = NULL;
 #define L(FMT, ...) do { if (!LOG) LOG = os_log_create("com.shosh.vcaminject", "inject"); \
     os_log(LOG, "%s: " FMT, __func__, ##__VA_ARGS__); } while (0)
+
+// ---------------------------------------------------------------- Telemetrie (atomar)
+static _Atomic uint64_t g_rxNalCount = 0;
+static _Atomic uint64_t g_spsCount = 0;
+static _Atomic uint64_t g_ppsCount = 0;
+static _Atomic uint64_t g_idrCount = 0;
+static _Atomic uint64_t g_formatDescCount = 0;
+static _Atomic uint64_t g_decodeSubmitCount = 0;
+static _Atomic uint64_t g_decodeOutputCount = 0;
+static _Atomic uint64_t g_decodeErrorCount = 0;
+static _Atomic uint64_t g_emitCalls = 0;
+static _Atomic uint64_t g_sendCalls = 0;
+static _Atomic uint64_t g_buildCalls = 0;
+static _Atomic uint64_t g_swapCount = 0;
+static _Atomic uint64_t g_origCount = 0;
+static _Atomic uint64_t g_hasLatestFrame = 0;
 
 // ---------------------------------------------------------------- Globals
 static NSMutableArray<NSData *> *g_nalQueue = nil;
@@ -31,7 +54,6 @@ static VTDecompressionSessionRef g_vtSession = NULL;
 static CMFormatDescriptionRef g_fmtDesc = NULL;
 static CVPixelBufferRef g_latestFrame = NULL;
 static NSLock *g_frameLock = nil;
-static int g_swapCount = 0;
 
 static void enqueueNal(NSData *nal) {
     if (nal.length < 4) return;
@@ -56,11 +78,18 @@ static NSData *dequeueNal(void) {
 static void decompressionOutputCallback(void *refCon, void *srcRef,
     OSStatus status, VTDecodeInfoFlags info, CVPixelBufferRef imageBuffer,
     CMTime pts, CMTime duration) {
-    if (status != noErr || !imageBuffer) return;
+    if (status != noErr) {
+        atomic_fetch_add(&g_decodeErrorCount, 1);
+        return;
+    }
+    if (!imageBuffer) return;
+    atomic_fetch_add(&g_decodeOutputCount, 1);
+
     [g_frameLock lock];
     if (g_latestFrame) CVPixelBufferRelease(g_latestFrame);
     g_latestFrame = CVPixelBufferRetain(imageBuffer);
     [g_frameLock unlock];
+    atomic_store(&g_hasLatestFrame, 1);
 }
 
 static void pumpDecoder(void) {
@@ -70,6 +99,12 @@ static void pumpDecoder(void) {
         const uint8_t *bytes = (const uint8_t *)nal.bytes;
         uint8_t nalType = bytes[0] & 0x1f;
 
+        atomic_fetch_add(&g_rxNalCount, 1);
+        if (nalType == 7) atomic_fetch_add(&g_spsCount, 1);
+        else if (nalType == 8) atomic_fetch_add(&g_ppsCount, 1);
+        else if (nalType == 5) atomic_fetch_add(&g_idrCount, 1);
+
+        // --- Format-Description aus SPS+PPS aufbauen (AVCC, lengthSize=4) ---
         if (g_fmtDesc == NULL) {
             static NSMutableData *sps, *pps;
             static dispatch_once_t once;
@@ -82,12 +117,17 @@ static void pumpDecoder(void) {
                 OSStatus st = CMVideoFormatDescriptionCreateFromH264ParameterSets(
                     kCFAllocatorDefault, 2, ptrs, sizes, 4, &g_fmtDesc);
                 if (st == noErr && g_fmtDesc) {
+                    atomic_fetch_add(&g_formatDescCount, 1);
                     CMVideoDimensions dims = CMVideoFormatDescriptionGetDimensions(g_fmtDesc);
                     L("FormatDescription OK %dx%d", (int)dims.width, (int)dims.height);
+                } else {
+                    L("FormatDescription FAIL: %d", (int)st);
                 }
             }
             return;
         }
+
+        // --- VT-Session einmalig anlegen ---
         if (g_vtSession == NULL) {
             VTDecompressionOutputCallbackRecord cb;
             cb.decompressionOutputCallback = decompressionOutputCallback;
@@ -98,12 +138,18 @@ static void pumpDecoder(void) {
             };
             OSStatus st = VTDecompressionSessionCreate(kCFAllocatorDefault, g_fmtDesc, NULL,
                 (__bridge CFDictionaryRef)attrs, &cb, &g_vtSession);
-            if (st != noErr || !g_vtSession) return;
+            if (st != noErr || !g_vtSession) {
+                L("VT-Session FAIL: %d", (int)st);
+                return;
+            }
             L("Decode-Session OK");
         }
-        static const uint8_t sc[4] = { 0, 0, 0, 1 };
-        NSMutableData *block = [NSMutableData dataWithBytes:sc length:4];
+
+        // --- AVCC-Block bauen: [4-Byte-Länge][NAL] (KEIN Annex-B-Startcode!) ---
+        uint32_t nalLen = htonl((uint32_t)nal.length);
+        NSMutableData *block = [NSMutableData dataWithBytes:&nalLen length:4];
         [block appendData:nal];
+
         CMBlockBufferRef bb = NULL;
         CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault, NULL, block.length,
             kCFAllocatorDefault, NULL, 0, block.length, 0, &bb);
@@ -120,6 +166,7 @@ static void pumpDecoder(void) {
         CMSampleBufferCreate(kCFAllocatorDefault, bb, true, NULL, NULL, g_fmtDesc, 1, 0, NULL, 0, NULL, &sb);
         CFRelease(bb);
         if (!sb) return;
+        atomic_fetch_add(&g_decodeSubmitCount, 1);
         VTDecompressionSessionDecodeFrame(g_vtSession, sb, 0, NULL, NULL);
         CFRelease(sb);
     }
@@ -127,6 +174,7 @@ static void pumpDecoder(void) {
 
 // ---------------------------------------------------------------- Frame-Swap
 static CMSampleBufferRef buildSwapSampleBuffer(void) {
+    atomic_fetch_add(&g_buildCalls, 1);
     CVPixelBufferRef px = NULL;
     [g_frameLock lock];
     if (g_latestFrame) px = CVPixelBufferRetain(g_latestFrame);
@@ -139,7 +187,7 @@ static CMSampleBufferRef buildSwapSampleBuffer(void) {
 
     CMSampleTimingInfo timing = {
         .duration = CMTimeMake(1, 30),
-        .presentationTimeStamp = CMTimeMake(g_swapCount, 30),
+        .presentationTimeStamp = CMTimeMake((int64_t)atomic_load(&g_swapCount), 30),
         .decodeTimeStamp = kCMTimeInvalid,
     };
     CMSampleBufferRef sb = NULL;
@@ -147,36 +195,78 @@ static CMSampleBufferRef buildSwapSampleBuffer(void) {
     CFRelease(fmt);
     CVPixelBufferRelease(px);
     if (st != noErr || !sb) return NULL;
+    atomic_fetch_add(&g_swapCount, 1);
     return sb;
 }
 
 // ---------------------------------------------------------------- FigCapture-Hook
 %hook FigCaptureClientSessionMonitor
 - (void)emitSampleBuffer:(id)sampleBuffer {
+    atomic_fetch_add(&g_emitCalls, 1);
     CMSampleBufferRef fake = buildSwapSampleBuffer();
     if (fake) {
-        g_swapCount++;
         %orig((__bridge id)fake);
         CFRelease(fake);
-        if (g_swapCount % 300 == 1) L("swap# %d", g_swapCount);
         return;
     }
+    atomic_fetch_add(&g_origCount, 1);
     %orig;
 }
 
 - (void)sendMediaServerdSampleAtPoint:(id)sampleBuffer {
+    atomic_fetch_add(&g_sendCalls, 1);
     CMSampleBufferRef fake = buildSwapSampleBuffer();
     if (fake) {
-        g_swapCount++;
         %orig((__bridge id)fake);
         CFRelease(fake);
         return;
     }
+    atomic_fetch_add(&g_origCount, 1);
     %orig;
 }
 %end
 
-// ---------------------------------------------------------------- WS-Client (Loopback zum Hub)
+// ---------------------------------------------------------------- Status-Server (8769)
+static void statusServerThread(void) {
+    int srv = socket(AF_INET, SOCK_STREAM, 0);
+    if (srv < 0) return;
+    int one = 1;
+    setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    struct sockaddr_in addr = {0};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(STATUS_PORT);
+    if (bind(srv, (struct sockaddr *)&addr, sizeof(addr)) < 0) { close(srv); return; }
+    if (listen(srv, 4) < 0) { close(srv); return; }
+    L("Status-Server auf 127.0.0.1:%d", STATUS_PORT);
+    while (1) {
+        int c = accept(srv, NULL, NULL);
+        if (c < 0) continue;
+        char msg[1024];
+        snprintf(msg, sizeof(msg),
+            "rxNal=%llu sps=%llu pps=%llu idr=%llu "
+            "formatDesc=%llu submit=%llu output=%llu errors=%llu "
+            "emit=%llu send=%llu build=%llu swap=%llu orig=%llu hasFrame=%llu\n",
+            (unsigned long long)atomic_load(&g_rxNalCount),
+            (unsigned long long)atomic_load(&g_spsCount),
+            (unsigned long long)atomic_load(&g_ppsCount),
+            (unsigned long long)atomic_load(&g_idrCount),
+            (unsigned long long)atomic_load(&g_formatDescCount),
+            (unsigned long long)atomic_load(&g_decodeSubmitCount),
+            (unsigned long long)atomic_load(&g_decodeOutputCount),
+            (unsigned long long)atomic_load(&g_decodeErrorCount),
+            (unsigned long long)atomic_load(&g_emitCalls),
+            (unsigned long long)atomic_load(&g_sendCalls),
+            (unsigned long long)atomic_load(&g_buildCalls),
+            (unsigned long long)atomic_load(&g_swapCount),
+            (unsigned long long)atomic_load(&g_origCount),
+            (unsigned long long)atomic_load(&g_hasLatestFrame));
+        send(c, msg, strlen(msg), 0);
+        close(c);
+    }
+}
+
+// ---------------------------------------------------------------- WS-Client
 static void wsClientThread(void) {
     while (1) {
         @autoreleasepool {
@@ -250,10 +340,6 @@ static void wsClientThread(void) {
 %ctor {
     NSString *proc = [[NSProcessInfo processInfo] processName];
     L("injiziert in %@ (pid=%d)", proc, getpid());
-    // Marker: an MEHREREN Orten schreiben
-    NSString *marker = [NSString stringWithFormat:@"inject loaded proc=%@ pid=%d\n", proc, getpid()];
-    [marker writeToFile:@"/var/mobile/Documents/vcaminject_loaded.txt" atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    [marker writeToFile:@"/tmp/vcaminject_loaded.txt" atomically:YES encoding:NSUTF8StringEncoding error:nil];
     if (![proc isEqualToString:@"mediaserverd"]) return;
 
     g_nalQueue = [NSMutableArray array];
@@ -268,6 +354,9 @@ static void wsClientThread(void) {
             pumpDecoder();
             usleep(2500);
         }
+    });
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        statusServerThread();
     });
     L("bereit — verbinde mit Hub");
 }
