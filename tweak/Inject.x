@@ -239,9 +239,33 @@ static CMSampleBufferRef buildSwapSampleBuffer(void) {
 }
 %end
 
+static _Atomic int64_t g_origPixelFormat = 0;
+static _Atomic int64_t g_origWidth = 0;
+static _Atomic int64_t g_origHeight = 0;
+
 %hook BWNodeOutput
 - (void)emitSampleBuffer:(id)sampleBuffer {
     atomic_fetch_add(&g_emitCalls, 1);
+
+    // Einmalig: Original-Pixel-Format + Dimensionen erfassen (Diagnose)
+    if (atomic_load(&g_origPixelFormat) == 0) {
+        CMSampleBufferRef orig = (__bridge CMSampleBufferRef)sampleBuffer;
+        if (orig) {
+            CVPixelBufferRef px = CMSampleBufferGetImageBuffer(orig);
+            if (px) {
+                OSType fmt = CVPixelBufferGetPixelFormatType(px);
+                size_t w = CVPixelBufferGetWidth(px);
+                size_t h = CVPixelBufferGetHeight(px);
+                atomic_store(&g_origPixelFormat, (int64_t)fmt);
+                atomic_store(&g_origWidth, (int64_t)w);
+                atomic_store(&g_origHeight, (int64_t)h);
+                L("ORIGINAL format=0x%08x (%c%c%c%c) %zux%zu",
+                  (unsigned)fmt, (int)(fmt>>24)&0xff, (int)(fmt>>16)&0xff,
+                  (int)(fmt>>8)&0xff, (int)fmt&0xff, w, h);
+            }
+        }
+    }
+
     CMSampleBufferRef fake = buildSwapSampleBuffer();
     if (fake) {
         %orig((__bridge id)fake);
@@ -291,6 +315,11 @@ static void statusServerThread(void) {
             (unsigned long long)atomic_load(&g_hasLatestFrame),
             (unsigned long long)atomic_load(&g_vtSessionAttempts),
             (long long)atomic_load(&g_vtSessionError));
+        int fw = snprintf(msg + w, sizeof(msg) - w, " origFmt=0x%08x origSize=%lldx%lld\n",
+            (unsigned)(long long)atomic_load(&g_origPixelFormat),
+            (long long)atomic_load(&g_origWidth),
+            (long long)atomic_load(&g_origHeight));
+        if (fw > 0) w += fw;
         if (g_methodDump[0]) {
             int mw = snprintf(msg + w, sizeof(msg) - w, "BW: %s\n", g_methodDump);
             if (mw > 0) w += mw;
