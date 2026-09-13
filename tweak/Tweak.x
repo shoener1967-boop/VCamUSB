@@ -220,7 +220,11 @@ static void wsServerThread(void) {
 @interface VCamFloatVC : UIViewController
 @end
 
-@implementation VCamFloatVC
+@implementation VCamFloatVC {
+    UIView *_menuView;
+    BOOL _menuOpen;
+}
+
 - (void)loadView {
     self.view = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 60, 60)];
     self.view.backgroundColor = [UIColor clearColor];
@@ -235,24 +239,62 @@ static void wsServerThread(void) {
 
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(onDrag:)];
     [self.view addGestureRecognizer:pan];
+    _menuOpen = NO;
 }
+
+// Eigenes Inline-Menü statt UIAlertController (der killt das Fenster in SpringBoard)
 - (void)onTap {
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"VCamUSB"
-        message:[NSString stringWithFormat:@"Status: %d Frames dekodiert", g_frameCount]
-        preferredStyle:UIAlertControllerStyleActionSheet];
-    UIAlertAction *usb = [UIAlertAction actionWithTitle:@"USB (PC-Server)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a){
-        NSLog(@"[VCamUSB] Modus gewählt: USB");
-    }];
-    UIAlertAction *wlan = [UIAlertAction actionWithTitle:@"WLAN (PC-Server)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a){
-        NSLog(@"[VCamUSB] Modus gewählt: WLAN");
-    }];
-    UIAlertAction *album = [UIAlertAction actionWithTitle:@"Album (Video)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a){
-        NSLog(@"[VCamUSB] Modus gewählt: Album");
-    }];
-    UIAlertAction *cancel = [UIAlertAction actionWithTitle:@"Abbrechen" style:UIAlertActionStyleCancel handler:nil];
-    [ac addAction:usb]; [ac addAction:wlan]; [ac addAction:album]; [ac addAction:cancel];
-    [self presentViewController:ac animated:YES completion:nil];
+    if (_menuOpen) {
+        [_menuView removeFromSuperview];
+        _menuView = nil;
+        _menuOpen = NO;
+        return;
+    }
+    _menuOpen = YES;
+    _menuView = [[UIView alloc] initWithFrame:CGRectMake(-180, 70, 250, 180)];
+    _menuView.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.95];
+    _menuView.layer.cornerRadius = 14;
+    _menuView.clipsToBounds = YES;
+
+    NSArray *items = @[
+        @{@"t": @"USB (PC-Server)", @"a": @"usb"},
+        @{@"t": @"WLAN (PC-Server)", @"a": @"wlan"},
+        @{@"t": @"Album (Video)", @"a": @"album"},
+        @{@"t": [NSString stringWithFormat:@"Frames: %d", g_frameCount], @"a": @"status"},
+    ];
+    for (int i = 0; i < items.count; i++) {
+        UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+        b.frame = CGRectMake(0, i * 44, 250, 44);
+        [b setTitle:items[i][@"t"] forState:UIControlStateNormal];
+        [b setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        b.tag = i;
+        [b addTarget:self action:@selector(menuAction:) forControlEvents:UIControlEventTouchUpInside];
+        [_menuView addSubview:b];
+    }
+    [self.view addSubview:_menuView];
+    // Fenster vergrößern, damit das Menü sichtbar ist
+    self.view.frame = CGRectMake(self.view.frame.origin.x, self.view.frame.origin.y, 250, 260);
 }
+
+- (void)menuAction:(UIButton *)sender {
+    switch (sender.tag) {
+        case 0: NSLog(@"[VCamUSB] Modus: USB"); break;
+        case 1: NSLog(@"[VCamUSB] Modus: WLAN"); break;
+        case 2: NSLog(@"[VCamUSB] Modus: Album"); break;
+        default: break;
+    }
+    [_menuView removeFromSuperview];
+    _menuView = nil;
+    _menuOpen = NO;
+    // Fenster zurückschneiden auf Kreis-Größe
+    self.view.frame = CGRectMake(self.view.frame.origin.x, self.view.frame.origin.y, 60, 60);
+    for (UIView *v in self.view.subviews) {
+        if ([v isKindOfClass:[UIButton class]] && v.frame.size.width == 60) {
+            v.frame = self.view.bounds;
+        }
+    }
+}
+
 - (void)onDrag:(UIPanGestureRecognizer *)pan {
     static CGPoint startCenter;
     if (pan.state == UIGestureRecognizerStateBegan) {
@@ -261,7 +303,6 @@ static void wsServerThread(void) {
     CGPoint t = [pan translationInView:self.view.superview];
     self.view.center = CGPointMake(startCenter.x + t.x, startCenter.y + t.y);
     if (pan.state == UIGestureRecognizerStateEnded) {
-        // an den Rand snapen
         CGRect sb = [UIScreen mainScreen].bounds;
         CGPoint c = self.view.center;
         if (c.x < sb.size.width / 2) c.x = 30 + 10;
