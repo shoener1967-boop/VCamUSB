@@ -1,10 +1,14 @@
-// VCamHub — WS-Server + schwebender Status-Banner in SpringBoard (Dopamine2-roothide)
+// VCamHub — WS-Server + Floating-Button in SpringBoard (Dopamine2-roothide)
 //
-// Referenz-Muster (aus LordVCAM, funktioniert nachweislich auf iOS 16):
-//   - Eigener UIWindow (buttonWindow), makeKeyAndVisible, hoher windowLevel
-//   - Observer auf UIApplicationDidFinishLaunchingNotification
-//   - Button als Subview des Windows
-//   - WS-Server in eigenem Thread
+// Diagnose-Phase: Erst Sichtbarkeit eines roten Probe-Quadrats beweisen,
+// dann schrittweise Button/Kreis/Status/Farbe aufbauen (nach LordVCAM-Muster).
+//
+// Wichtige Punkte (nach Laufzeit-Analyse):
+//   - Window als statische Variable dauerhaft retained
+//   - kein rootViewController nötig (Referenz nutzt direkte Subviews)
+//   - hidden = NO statt makeKeyAndVisible (vermeidet Key-Window-Verhalten)
+//   - Fallback-Start: Notification + zusätzlich feste Verzögerung (idempotent)
+//   - UIKit ausschließlich auf dem Main-Thread
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -27,20 +31,9 @@ static int g_clients[16] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
 static pthread_mutex_t g_cliMutex = PTHREAD_MUTEX_INITIALIZER;
 static int g_clientCount = 0;
 
-// ---------------------------------------------------------------- Banner
-static UIWindow *g_buttonWindow = nil;
+// ---------------------------------------------------------------- UI (dauerhaft retained)
+static UIWindow *g_overlayWindow = nil;
 static UIButton *g_floatingButton = nil;
-
-static void bannerUpdateStatus(void) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (!g_floatingButton) return;
-        int clients = g_clientCount;
-        UIColor *c = clients > 0
-            ? [UIColor colorWithRed:0.16 green:0.78 blue:0.34 alpha:0.95]
-            : [UIColor colorWithRed:0.90 green:0.30 blue:0.30 alpha:0.95];
-        g_floatingButton.backgroundColor = c;
-    });
-}
 
 static void hubAddClient(int fd) {
     pthread_mutex_lock(&g_cliMutex);
@@ -49,7 +42,6 @@ static void hubAddClient(int fd) {
     }
     pthread_mutex_unlock(&g_cliMutex);
     L("client+ total=%d", g_clientCount);
-    bannerUpdateStatus();
 }
 
 static void hubRemoveClient(int fd) {
@@ -59,7 +51,6 @@ static void hubRemoveClient(int fd) {
     }
     pthread_mutex_unlock(&g_cliMutex);
     L("client- total=%d", g_clientCount);
-    bannerUpdateStatus();
 }
 
 static void hubBroadcastExcept(int fromFd, const uint8_t *data, size_t len) {
@@ -193,37 +184,29 @@ static void hubServerThread(void) {
     }
 }
 
-// ---------------------------------------------------------------- Floating Button
-static void setupFloatingButton(void) {
-    CGRect screen = [UIScreen mainScreen].bounds;
-    CGFloat size = 60.0;
-    CGFloat margin = 18.0;
+// ---------------------------------------------------------------- Overlay (Minimalprobe)
+static void showOverlay(void) {
+    if (g_overlayWindow != nil) return;   // idempotent
 
-    g_buttonWindow = [[UIWindow alloc] initWithFrame:screen];
-    g_buttonWindow.windowLevel = UIWindowLevelAlert + 100.0;
-    g_buttonWindow.backgroundColor = [UIColor clearColor];
+    CGRect frame = [UIScreen mainScreen].bounds;
+    L("screen=%@", NSStringFromCGRect(frame));
 
-    UIViewController *root = [[UIViewController alloc] init];
-    root.view.backgroundColor = [UIColor clearColor];
-    g_buttonWindow.rootViewController = root;
+    g_overlayWindow = [[UIWindow alloc] initWithFrame:frame];
+    g_overlayWindow.windowLevel = UIWindowLevelAlert + 100.0;
+    g_overlayWindow.backgroundColor = [UIColor clearColor];
+    g_overlayWindow.alpha = 1.0;
+    g_overlayWindow.hidden = NO;
+    g_overlayWindow.userInteractionEnabled = YES;
 
-    g_floatingButton = [UIButton buttonWithType:UIButtonTypeCustom];
-    g_floatingButton.frame = CGRectMake(screen.size.width - size - margin, 150, size, size);
-    g_floatingButton.layer.cornerRadius = size / 2.0;
-    g_floatingButton.layer.borderWidth = 3.0;
-    g_floatingButton.layer.borderColor = [UIColor whiteColor].CGColor;
-    g_floatingButton.layer.shadowColor = [UIColor blackColor].CGColor;
-    g_floatingButton.layer.shadowOpacity = 0.4;
-    g_floatingButton.layer.shadowRadius = 6.0;
-    g_floatingButton.layer.shadowOffset = CGSizeMake(0, 2);
-    [g_floatingButton setTitle:@"●" forState:UIControlStateNormal];
-    [g_floatingButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    g_floatingButton.titleLabel.font = [UIFont boldSystemFontOfSize:26];
-    [root.view addSubview:g_floatingButton];
+    // Probe: rotes Quadrat (diagnostisch — kein runder Kreis, kein Schatten)
+    UIView *probe = [[UIView alloc] initWithFrame:CGRectMake(30, 100, 100, 100)];
+    probe.backgroundColor = [UIColor redColor];
+    probe.userInteractionEnabled = YES;
+    [g_overlayWindow addSubview:probe];
 
-    [g_buttonWindow makeKeyAndVisible];
-    bannerUpdateStatus();
-    L("Floating-Button erstellt (makeKeyAndVisible)");
+    L("overlay erstellt window=%p hidden=%d alpha=%f level=%f frame=%@",
+      g_overlayWindow, g_overlayWindow.hidden, g_overlayWindow.alpha,
+      g_overlayWindow.windowLevel, NSStringFromCGRect(g_overlayWindow.frame));
 }
 
 // ---------------------------------------------------------------- Entry
@@ -233,20 +216,23 @@ static void vcamhub_init(void) {
     L("ctor in %@ (pid=%d)", proc, getpid());
     if (![proc isEqualToString:@"SpringBoard"]) return;
 
-    // WS-Server sofort
+    // WS-Server sofort (Hintergrund-Thread)
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         hubServerThread();
     });
 
-    // Floating-Button nach UIApplicationDidFinishLaunchingNotification (LordVCAM-Muster)
+    // Overlay via Notification (LordVCAM-Muster)
     [[NSNotificationCenter defaultCenter] addObserverForName:@"UIApplicationDidFinishLaunchingNotification"
         object:nil queue:[NSOperationQueue mainQueue]
         usingBlock:^(NSNotification *note) {
-            L("UIApplicationDidFinishLaunchingNotification empfangen");
+            L("DidFinishLaunchingNotification empfangen");
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{
-                setupFloatingButton();
-            });
+                           dispatch_get_main_queue(), ^{ showOverlay(); });
         }];
-    L("Hub bereit (Observer registriert)");
+
+    // Fallback: feste Verzögerung (falls Notification verpasst wurde)
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ showOverlay(); });
+
+    L("Hub bereit");
 }
