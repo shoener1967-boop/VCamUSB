@@ -1,13 +1,9 @@
-// VCamUSB — virtuelle Kamera über USB (v1: Transport + Decoder + Recon)
+// VCamUSB — virtuelle Kamera über USB (Phase 2)
 //
-// Phase 1 (dieses Build):
-//   - SpringBoard bindet WS-Server auf 127.0.0.1:8767
-//   - Empfängt H.264-NAL-Units vom PC, dekodiert mit VideoToolbox
-//   - Loggt Frames/Fehler über NSLog (oslog)
-//   - Recon-Modus: dumped Methodennamen von AVCapture/FigCapture-Klassen,
-//     damit der richtige Injektionspunkt aufm Gerät gefunden werden kann
-// Phase 2 (nach Recon auf deinem Gerät):
-//   - Hook des echten Kamera-Pfads (mediaserverd / AVCaptureVideoDataOutput)
+// Läuft NUR in SpringBoard (kein mediaserverd-Injection → kein Crash):
+//   - Schwebender Kreis (draggable), Tap öffnet Menü: USB / WLAN / Album
+//   - WS-Server auf 127.0.0.1:8767, empfängt H.264 vom PC
+//   - H.264-Decode via VideoToolbox
 //
 // Kein Login, keine Lizenz, keine Cloud. iOS 15+ (16.7 roothide + 18.x Relaxin).
 
@@ -17,7 +13,6 @@
 #import <CoreMedia/CoreMedia.h>
 #import <VideoToolbox/VideoToolbox.h>
 #import <AVFoundation/AVFoundation.h>
-#import <objc/runtime.h>
 #import <sys/socket.h>
 #import <netinet/in.h>
 #import <arpa/inet.h>
@@ -35,6 +30,7 @@ static CVPixelBufferRef g_latestFrame = NULL;
 static NSLock *g_frameLock = nil;
 static int g_frameCount = 0;
 
+// ---------------------------------------------------------------- WS Util
 static NSString *wsAcceptKey(NSString *key) {
     NSString *magic = [key stringByAppendingString:@"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"];
     unsigned char digest[CC_SHA1_DIGEST_LENGTH];
@@ -61,6 +57,7 @@ static NSData *dequeueNal(void) {
     return nal;
 }
 
+// ---------------------------------------------------------------- Decoder
 static void decompressionOutputCallback(void *refCon, void *srcRef,
     OSStatus status, VTDecodeInfoFlags info, CVPixelBufferRef imageBuffer,
     CMTime pts, CMTime duration) {
@@ -76,7 +73,6 @@ static void pumpDecoder(void) {
     @autoreleasepool {
         NSData *nal = dequeueNal();
         if (!nal) return;
-
         const uint8_t *bytes = (const uint8_t *)nal.bytes;
         uint8_t nalType = bytes[0] & 0x1f;
 
@@ -91,11 +87,10 @@ static void pumpDecoder(void) {
                 size_t sizes[2] = { sps.length, pps.length };
                 CMVideoFormatDescriptionCreateFromH264ParameterSets(
                     kCFAllocatorDefault, 2, ptrs, sizes, 4, &g_fmtDesc);
-                if (g_fmtDesc) NSLog(@"[VCamUSB] FormatDescription OK (%lu/%lu)", (unsigned long)sps.length, (unsigned long)pps.length);
+                if (g_fmtDesc) NSLog(@"[VCamUSB] FormatDescription OK");
             }
             return;
         }
-
         if (g_vtSession == NULL) {
             VTDecompressionOutputCallbackRecord cb;
             cb.decompressionOutputCallback = decompressionOutputCallback;
@@ -104,16 +99,14 @@ static void pumpDecoder(void) {
                 (__bridge id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
                 (__bridge id)kCVPixelBufferMetalCompatibilityKey: @YES,
             };
-            OSStatus st = VTDecompressionSessionCreate(
-                kCFAllocatorDefault, g_fmtDesc, NULL, (__bridge CFDictionaryRef)attrs, &cb, &g_vtSession);
-            if (st != noErr || !g_vtSession) { NSLog(@"[VCamUSB] VT session failed %d", (int)st); return; }
+            OSStatus st = VTDecompressionSessionCreate(kCFAllocatorDefault, g_fmtDesc, NULL,
+                (__bridge CFDictionaryRef)attrs, &cb, &g_vtSession);
+            if (st != noErr || !g_vtSession) return;
             NSLog(@"[VCamUSB] Decode-Session OK");
         }
-
         static const uint8_t sc[4] = { 0, 0, 0, 1 };
         NSMutableData *block = [NSMutableData dataWithBytes:sc length:4];
         [block appendData:nal];
-
         CMBlockBufferRef bb = NULL;
         CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault, NULL, block.length,
             kCFAllocatorDefault, NULL, 0, block.length, 0, &bb);
@@ -121,17 +114,16 @@ static void pumpDecoder(void) {
         size_t lenAtOffset = 0, totalLen = 0;
         CMBlockBufferGetDataPointer(bb, 0, &lenAtOffset, &totalLen, &dst);
         memcpy(dst, block.bytes, block.length);
-
         CMSampleBufferRef sb = NULL;
         CMSampleBufferCreate(kCFAllocatorDefault, bb, true, NULL, NULL, g_fmtDesc, 1, 0, NULL, 0, NULL, &sb);
         CFRelease(bb);
         if (!sb) return;
-
         VTDecompressionSessionDecodeFrame(g_vtSession, sb, 0, NULL, NULL);
         CFRelease(sb);
     }
 }
 
+// ---------------------------------------------------------------- WS Server
 static void wsServerThread(void) {
     int srv = socket(AF_INET, SOCK_STREAM, 0);
     if (srv < 0) return;
@@ -143,19 +135,16 @@ static void wsServerThread(void) {
     addr.sin_port = htons(WS_PORT);
     if (bind(srv, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         NSLog(@"[VCamUSB] bind fehlgeschlagen: %s", strerror(errno));
-        close(srv);
-        return;
+        close(srv); return;
     }
     if (listen(srv, 4) < 0) { close(srv); return; }
-    NSLog(@"[VCamUSB] WS-Server lauscht auf 127.0.0.1:%d", WS_PORT);
+    NSLog(@"[VCamUSB] WS-Server auf 127.0.0.1:%d", WS_PORT);
 
     while (1) {
         struct sockaddr_in cli = {0};
         socklen_t clen = sizeof(cli);
         int fd = accept(srv, (struct sockaddr *)&cli, &clen);
         if (fd < 0) continue;
-        NSLog(@"[VCamUSB] Client verbunden");
-
         uint8_t *buf = malloc(MAX_PENDING);
         ssize_t n = recv(fd, buf, MAX_PENDING - 1, 0);
         if (n > 0) {
@@ -169,7 +158,6 @@ static void wsServerThread(void) {
                     @"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %@\r\n\r\n",
                     wsAcceptKey(key)];
                 send(fd, [resp UTF8String], strlen([resp UTF8String]), 0);
-
                 uint8_t hdr[2];
                 while (recv(fd, hdr, 2, MSG_WAITALL) == 2) {
                     uint8_t opcode = hdr[0] & 0x0f;
@@ -188,7 +176,6 @@ static void wsServerThread(void) {
                     uint8_t mask[4] = {0};
                     if (masked && recv(fd, mask, 4, MSG_WAITALL) != 4) break;
                     if (plen > MAX_PENDING) break;
-
                     uint8_t *payload = malloc((size_t)plen);
                     size_t got = 0;
                     while (got < plen) {
@@ -198,7 +185,6 @@ static void wsServerThread(void) {
                     }
                     if (got < plen) { free(payload); break; }
                     if (masked) for (uint64_t i = 0; i < plen; i++) payload[i] ^= mask[i & 3];
-
                     if (opcode == 0x8) { free(payload); break; }
                     if (opcode == 0x2) {
                         enqueueNal([NSData dataWithBytesNoCopy:payload length:(NSUInteger)plen freeWhenDone:YES]);
@@ -215,74 +201,99 @@ static void wsServerThread(void) {
         }
         free(buf);
         close(fd);
-        NSLog(@"[VCamUSB] Client getrennt");
     }
 }
 
-// ---------------------------------------------------------------------------
-// Recon: Methodennamen der Kamera-Klassen dumpen (Phase-2-Vorbereitung)
-// ---------------------------------------------------------------------------
-static void reconDump(void) {
-    @autoreleasepool {
-        NSArray *candidates = @[
-            @"AVCaptureVideoDataOutput", @"AVCaptureSession", @"AVCaptureDevice",
-            @"AVCaptureDeviceInput", @"AVCaptureConnection", @"AVCapturePhotoOutput",
-            @"FigCaptureSource", @"FigCaptureSessionProxy", @"AVFigCaptureSession",
-        ];
-        unsigned int count = 0;
-        Class *all = objc_copyClassList(&count);
-        for (unsigned int i = 0; i < count; i++) {
-            Class cls = all[i];
-            NSString *name = NSStringFromClass(cls);
-            for (NSString *cand in candidates) {
-                if ([name isEqualToString:cand] || [name hasPrefix:cand]) {
-                    unsigned int mcount = 0;
-                    Method *methods = class_copyMethodList(cls, &mcount);
-                    NSMutableArray *names = [NSMutableArray array];
-                    for (unsigned int m = 0; m < mcount; m++) {
-                        [names addObject:NSStringFromSelector(method_getName(methods[m]))];
-                    }
-                    NSLog(@"[VCamUSB] RECON %@ (%u Methoden): %@", name, mcount,
-                          [names componentsJoinedByString:@", "]);
-                    free(methods);
-                }
-            }
-        }
-        free(all);
+// ---------------------------------------------------------------- Floating Circle
+@interface VCamFloatVC : UIViewController
+@end
+
+@implementation VCamFloatVC
+- (void)loadView {
+    self.view = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 60, 60)];
+    self.view.backgroundColor = [UIColor clearColor];
+    UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
+    btn.frame = self.view.bounds;
+    btn.layer.cornerRadius = 30;
+    btn.backgroundColor = [UIColor colorWithRed:0.1 green:0.45 blue:0.95 alpha:0.92];
+    btn.titleLabel.font = [UIFont boldSystemFontOfSize:20];
+    [btn setTitle:@"VC" forState:UIControlStateNormal];
+    [btn addTarget:self action:@selector(onTap) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:btn];
+
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(onDrag:)];
+    [self.view addGestureRecognizer:pan];
+}
+- (void)onTap {
+    NSLog(@"[VCamUSB] Kreis getappt — %d Frames dekodiert", g_frameCount);
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"VCamUSB"
+        message:[NSString stringWithFormat:@"Status: %d Frames dekodiert", g_frameCount]
+        preferredStyle:UIAlertControllerStyleActionSheet];
+    UIAlertAction *usb = [UIAlertAction actionWithTitle:@"USB (PC-Server)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a){
+        NSLog(@"[VCamUSB] Modus gewählt: USB");
+    }];
+    UIAlertAction *wlan = [UIAlertAction actionWithTitle:@"WLAN (PC-Server)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a){
+        NSLog(@"[VCamUSB] Modus gewählt: WLAN");
+    }];
+    UIAlertAction *album = [UIAlertAction actionWithTitle:@"Album (Video)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a){
+        NSLog(@"[VCamUSB] Modus gewählt: Album");
+    }];
+    UIAlertAction *cancel = [UIAlertAction actionWithTitle:@"Abbrechen" style:UIAlertActionStyleCancel handler:nil];
+    [ac addAction:usb]; [ac addAction:wlan]; [ac addAction:album]; [ac addAction:cancel];
+    [self presentViewController:ac animated:YES completion:nil];
+}
+- (void)onDrag:(UIPanGestureRecognizer *)pan {
+    static CGPoint startCenter;
+    if (pan.state == UIGestureRecognizerStateBegan) {
+        startCenter = self.view.center;
     }
+    CGPoint t = [pan translationInView:self.view.superview];
+    self.view.center = CGPointMake(startCenter.x + t.x, startCenter.y + t.y);
+    if (pan.state == UIGestureRecognizerStateEnded) {
+        // an den Rand snapen
+        CGRect sb = [UIScreen mainScreen].bounds;
+        CGPoint c = self.view.center;
+        if (c.x < sb.size.width / 2) c.x = 30 + 10;
+        else c.x = sb.size.width - 30 - 10;
+        [UIView animateWithDuration:0.2 animations:^{ self.view.center = c; }];
+    }
+}
+@end
+
+static void setupFloatingCircle(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        CGRect screen = [UIScreen mainScreen].bounds;
+        UIWindow *win = [[UIWindow alloc] initWithFrame:CGRectMake(screen.size.width - 70, 200, 60, 60)];
+        win.windowLevel = UIWindowLevelStatusBar + 50;
+        win.backgroundColor = [UIColor clearColor];
+        VCamFloatVC *vc = [VCamFloatVC new];
+        win.rootViewController = vc;
+        win.hidden = NO;
+        NSLog(@"[VCamUSB] Floating-Circle angezeigt");
+        // Fenster global halten (statisch im VC referenzieren)
+        objc_setAssociatedObject(vc, "vcam_win", win, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    });
 }
 
 %ctor {
     NSString *proc = [[NSProcessInfo processInfo] processName];
     NSLog(@"[VCamUSB] injiziert in %@", proc);
 
-    if ([proc isEqualToString:@"SpringBoard"]) {
-        g_nalQueue = [NSMutableArray array];
-        g_queueLock = [NSLock new];
-        g_frameLock = [NSLock new];
+    if (![proc isEqualToString:@"SpringBoard"]) return;
 
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-            wsServerThread();
-        });
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
-            while (1) {
-                pumpDecoder();
-                usleep(2000);
-            }
-        });
-        // Periodischer Status + Recon-Dump
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC),
-            dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
-            reconDump();
-        });
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
-            while (1) {
-                sleep(10);
-                [g_frameLock lock];
-                int fc = g_frameCount;
-                [g_frameLock unlock];
-                NSLog(@"[VCamUSB] decodierte Frames gesamt: %d", fc);
-            }
-        });
-    }
+    g_nalQueue = [NSMutableArray array];
+    g_queueLock = [NSLock new];
+    g_frameLock = [NSLock new];
+
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        wsServerThread();
+    });
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+        while (1) {
+            pumpDecoder();
+            usleep(2000);
+        }
+    });
+    setupFloatingCircle();
+    NSLog(@"[VCamUSB] Phase-2 geladen (SpringBoard only)");
 }
