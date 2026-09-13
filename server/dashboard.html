@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VCamUSB // Terminal</title>
+<style>
+  :root {
+    --ice:#B3D9FF; --ice-rgb:179,217,255; --gold:#F2BF33; --gold-rgb:242,191,51;
+    --green:#33CC66; --green-rgb:51,204,102; --red:#D94033; --red-rgb:217,64,51;
+    --cyan:#00CCE6; --cyan-rgb:0,204,230; --bg:#0A0A0F; --panel:rgba(18,18,24,.75);
+    --border:rgba(255,255,255,.15); --divider:rgba(255,255,255,.12);
+    --txt:rgba(255,255,255,.8); --txt2:rgba(255,255,255,.6); --muted:rgba(255,255,255,.5);
+    --field:rgba(255,255,255,.08); --font:'Segoe UI',-apple-system,system-ui,sans-serif;
+    --mono:Consolas,'SF Mono',monospace;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:var(--font); background:var(--bg); color:var(--txt); font-size:12px;
+         height:100vh; display:flex; flex-direction:column; overflow:hidden; }
+  header { background:var(--panel); backdrop-filter:blur(16px);
+    border-bottom:.5px solid var(--border); padding:10px 20px; display:flex;
+    align-items:center; justify-content:space-between; flex-shrink:0; }
+  .logo { display:flex; align-items:center; gap:8px; font-size:15px; font-weight:700;
+    color:#FFD91A; letter-spacing:3px; text-shadow:0 0 8px rgba(255,217,26,.9); }
+  .logo svg { width:18px; height:18px; fill:currentColor; }
+  .logo-sub { font-size:10px; color:var(--muted); letter-spacing:1px; }
+  .pulse { width:8px; height:8px; border-radius:50%; background:var(--muted);
+    flex-shrink:0; transition:all .3s; }
+  .pulse.online { background:var(--green); box-shadow:0 0 8px var(--green); animation:p 2s infinite; }
+  .pulse.offline { background:var(--red); box-shadow:0 0 8px var(--red); }
+  @keyframes p { 0%,100%{box-shadow:0 0 4px var(--green)} 50%{box-shadow:0 0 12px var(--green)} }
+  .main { display:flex; flex:1; overflow:hidden; }
+  .left { width:360px; min-width:360px; border-right:.5px solid var(--divider);
+    overflow-y:auto; padding:12px; display:flex; flex-direction:column; gap:10px; }
+  .right { flex:1; display:flex; flex-direction:column; overflow:hidden; }
+  .card { background:var(--panel); backdrop-filter:blur(20px); border:.5px solid var(--border);
+    border-radius:16px; padding:14px; }
+  .card-title { font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:2px;
+    color:var(--txt2); margin-bottom:10px; padding-bottom:8px;
+    border-bottom:.5px solid var(--divider); }
+  .grid { display:grid; grid-template-columns:90px 1fr; gap:4px 8px; font-family:var(--mono); }
+  .lbl { color:var(--muted); font-size:11px; } .lbl::after{content:':'}
+  .val { color:var(--txt); font-size:11px; font-weight:600; display:flex;
+    align-items:center; gap:6px; }
+  .val.hl { color:var(--cyan); } .val.ok { color:var(--green); } .val.off { color:var(--red); }
+  .stats { display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; }
+  .stat { background:rgba(var(--ice-rgb),.03); border:.5px solid rgba(var(--ice-rgb),.08);
+    border-radius:10px; padding:8px; text-align:center; }
+  .stat-l { font-size:9px; color:var(--muted); text-transform:uppercase; letter-spacing:1px; }
+  .stat-v { font-size:20px; font-weight:700; font-family:var(--mono); }
+  .row { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
+  .row label { min-width:70px; color:var(--muted); font-size:11px; text-transform:uppercase; }
+  select, input, button { background:var(--field); border:.5px solid var(--border);
+    color:var(--txt); padding:6px 10px; border-radius:8px; font-family:var(--mono);
+    font-size:12px; flex:1; min-width:0; outline:none; }
+  select option { background:var(--bg); }
+  input[type=range] { -webkit-appearance:none; height:4px; background:rgba(var(--ice-rgb),.15);
+    border:none; padding:0; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:12px; height:12px;
+    border-radius:50%; background:var(--ice); cursor:pointer; }
+  .btn { background:rgba(51,51,51,.8); color:var(--ice); border:.5px solid rgba(255,255,255,.2);
+    padding:8px 16px; border-radius:10px; cursor:pointer; font-family:var(--font);
+    font-size:11px; font-weight:600; width:100%; margin-top:6px; text-transform:uppercase;
+    letter-spacing:2px; transition:all .2s; }
+  .btn:hover { background:rgba(var(--ice-rgb),.1); box-shadow:0 0 10px rgba(var(--ice-rgb),.35); }
+  .btn:disabled { opacity:.3; cursor:not-allowed; }
+  .btn-sm { width:auto; margin:0; padding:3px 10px; font-size:9px; }
+  .hint { margin-top:6px; padding:6px 8px; background:rgba(var(--gold-rgb),.06);
+    border:.5px solid rgba(var(--gold-rgb),.15); border-radius:4px; font-size:10px;
+    color:var(--gold); line-height:1.4; }
+  .preview-hdr { display:flex; align-items:center; gap:8px; padding:12px 12px 0;
+    font-size:10px; letter-spacing:1px; font-weight:600; text-transform:uppercase; }
+  .preview-hdr .info { margin-left:auto; font-family:var(--mono); color:var(--txt2);
+    text-transform:none; letter-spacing:0; }
+  .preview { flex:1; display:flex; align-items:center; justify-content:center;
+    background:#07070C; border:.5px solid var(--border); border-radius:14px;
+    overflow:hidden; position:relative; margin:12px; cursor:grab; }
+  .preview:active { cursor:grabbing; }
+  .preview img { position:absolute; width:100%; height:100%; object-fit:contain; pointer-events:none; }
+  .preview .empty { color:var(--muted); font-size:11px; letter-spacing:1px; position:absolute; }
+  .controls { display:flex; gap:6px; align-items:center; margin:0 12px 12px; flex-wrap:wrap; }
+  .filter-row { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
+  .filter-row label { min-width:70px; color:var(--muted); font-size:10px; text-transform:uppercase; }
+  .filter-row span { min-width:38px; text-align:right; color:var(--txt2);
+    font-family:var(--mono); font-size:11px; }
+</style>
+</head>
+<body>
+<header>
+  <div style="display:flex;align-items:center;gap:12px">
+    <span class="logo">VCAM<svg viewBox="0 0 24 24"><path d="M17 10.5V7a1 1 0 00-1-1H4a1 1 0 00-1 1v10a1 1 0 001 1h12a1 1 0 001-1v-3.5l4 4v-11l-4 4z"/></svg>USB</span>
+    <span class="logo-sub">stream injection server</span>
+  </div>
+  <div style="font-family:var(--mono);font-size:11px;color:var(--cyan)">
+    <span class="pulse" id="wsDot" style="display:inline-block;vertical-align:middle"></span>
+    <span id="wsLabel">127.0.0.1:8767</span>
+  </div>
+</header>
+
+<div class="main">
+  <div class="left">
+    <div class="card">
+      <div class="card-title">Connection</div>
+      <div class="grid">
+        <span class="lbl">TWEAK</span>
+        <span class="val" id="cTweak"><span class="pulse" id="tweakDot"></span><span id="tweakLabel">OFFLINE</span></span>
+        <span class="lbl">SOURCE</span>
+        <span class="val hl" id="cSource">--</span>
+        <span class="lbl">ENCODE</span>
+        <span class="val" id="cEncode">--</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Live Stats</div>
+      <div class="stats">
+        <div class="stat"><div class="stat-l">FPS</div><div class="stat-v" id="sFps">0</div></div>
+        <div class="stat"><div class="stat-l">SENT</div><div class="stat-v" id="sSent" style="font-size:14px">0 MB</div></div>
+        <div class="stat"><div class="stat-l">UPTIME</div><div class="stat-v" id="sUp" style="font-size:14px">00:00</div></div>
+      </div>
+      <div class="hint" id="errHint" style="display:none"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Source</div>
+      <div class="row">
+        <button class="btn btn-sm" id="bFile" onclick="setSource('file')">Image/Video</button>
+        <button class="btn btn-sm" id="bCam" onclick="setSource('cam')">Camera</button>
+      </div>
+      <div id="camCfg" style="display:none">
+        <div class="row"><label>Camera</label><select id="camSel"></select></div>
+        <div class="hint">OBS users: start Virtual Camera in OBS first, then select it above.</div>
+      </div>
+      <div id="fileCfg" style="display:none">
+        <input type="file" id="fUpload" accept="video/*,image/*" style="display:none">
+        <button class="btn" onclick="document.getElementById('fUpload').click()">UPLOAD</button>
+        <button class="btn" onclick="ctrl('clear_source')" style="border-color:rgba(var(--red-rgb),.4);color:var(--red)">CLEAR</button>
+      </div>
+      <div class="row">
+        <label>FPS</label>
+        <button class="btn btn-sm" id="b30" onclick="setFps(30)">30</button>
+        <button class="btn btn-sm" id="b60" onclick="setFps(60)">60</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Filters</div>
+      <div class="filter-row"><label>Brightness</label><input type="range" id="fB" min="-100" max="100" value="0"><span id="fBv">0.00</span></div>
+      <div class="filter-row"><label>Contrast</label><input type="range" id="fC" min="25" max="400" value="100"><span id="fCv">1.00</span></div>
+      <div class="filter-row"><label>Saturation</label><input type="range" id="fS" min="0" max="200" value="100"><span id="fSv">1.00</span></div>
+      <div class="filter-row"><label>Gamma</label><input type="range" id="fG" min="10" max="300" value="100"><span id="fGv">1.00</span></div>
+      <button class="btn" onclick="resetFilters()" style="border-color:var(--muted);color:var(--muted)">RESET FILTERS</button>
+    </div>
+  </div>
+
+  <div class="right">
+    <div class="preview-hdr">
+      <span>Media Player</span>
+      <span class="info" id="pInfo">1.0x | 0.00, 0.00</span>
+      <button class="btn btn-sm" onclick="mirror()" title="Mirror">⇄</button>
+      <button class="btn btn-sm" onclick="rotate(-90)" title="Rotate L">↺</button>
+      <button class="btn btn-sm" onclick="rotate(90)" title="Rotate R">↻</button>
+      <button class="btn btn-sm" id="bEye" onclick="toggleEyedropper()" title="Pick bg">◉</button>
+      <button class="btn btn-sm" onclick="resetTransform()">RESET</button>
+    </div>
+    <div class="preview" id="pBox">
+      <div class="empty" id="pEmpty">no source active</div>
+      <img id="pImg" style="display:none">
+    </div>
+    <div class="controls">
+      <button class="btn btn-sm" onclick="pb('play')">▶</button>
+      <button class="btn btn-sm" onclick="pb('pause')">⏸</button>
+      <button class="btn btn-sm" onclick="pb('stop')">⏹</button>
+      <button class="btn btn-sm" id="bLoop" onclick="toggleLoop()">↻</button>
+      <input type="range" id="speed" min="50" max="200" value="100" style="width:90px;flex:none">
+      <span id="speedL" style="font-family:var(--mono);color:var(--txt2)">100%</span>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let tr = { zoom:1, panX:0, panY:0, flipH:false, rotation:0 };
+let eye = false, loop = true;
+
+function ctrl(type, extra) {
+  fetch('/api/control', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(Object.assign({type}, extra||{})) }).catch(()=>{});
+}
+function sendTransform() { ctrl('transform', { zoom:tr.zoom, panX:tr.panX, panY:tr.panY, flipH:tr.flipH, rotation:tr.rotation }); }
+function updInfo() { $('pInfo').textContent = tr.zoom.toFixed(1)+'x | '+tr.panX.toFixed(2)+', '+tr.panY.toFixed(2)+(tr.rotation?' | '+tr.rotation+'°':'')+(tr.flipH?' | MIRROR':''); }
+
+// ── Drag = Pan, Wheel = Zoom ──
+const box = $('pBox');
+let drag = null;
+box.addEventListener('mousedown', e => {
+  if (eye) {
+    // eyedropper: bg color from preview pixel
+    const img = $('pImg');
+    if (!img.src) return;
+    const r = box.getBoundingClientRect();
+    const x = (e.clientX-r.left)/r.width, y = (e.clientY-r.top)/r.height;
+    const cnv = document.createElement('canvas'); cnv.width=480; cnv.height=270;
+    const ctx = cnv.getContext('2d');
+    const tmp = new Image(); tmp.crossOrigin='anonymous';
+    tmp.onload = () => { ctx.drawImage(tmp,0,0,480,270);
+      const p = ctx.getImageData(Math.floor(x*480), Math.floor(y*270),1,1).data;
+      ctrl('bg_color', {r:p[0],g:p[1],b:p[2]}); };
+    tmp.src = img.src.split('?')[0]+'?t='+Date.now();
+    return;
+  }
+  drag = { x:e.clientX, y:e.clientY, px:tr.panX, py:tr.panY };
+  e.preventDefault();
+});
+window.addEventListener('mousemove', e => {
+  if (!drag) return;
+  const r = box.getBoundingClientRect();
+  tr.panX = Math.max(-5, Math.min(5, drag.px + (e.clientX-drag.x)/(r.width/2)));
+  tr.panY = Math.max(-5, Math.min(5, drag.py + (e.clientY-drag.y)/(r.height/2)));
+  updInfo(); sendTransform();
+});
+window.addEventListener('mouseup', () => drag=null);
+box.addEventListener('wheel', e => {
+  e.preventDefault();
+  tr.zoom = Math.max(0.1, Math.min(10, tr.zoom + (e.deltaY<0 ? tr.zoom*0.01 : -tr.zoom*0.01)));
+  updInfo(); sendTransform();
+}, {passive:false});
+
+function mirror() { tr.flipH = !tr.flipH; updInfo(); sendTransform(); }
+function rotate(d) { tr.rotation = (tr.rotation + d + 360) % 360; updInfo(); sendTransform(); }
+function resetTransform() { tr = {zoom:1,panX:0,panY:0,flipH:false,rotation:0}; updInfo(); sendTransform(); }
+function toggleEyedropper() {
+  eye = !eye;
+  box.style.cursor = eye ? 'crosshair' : 'grab';
+  $('bEye').style.borderColor = eye ? 'var(--ice)' : '';
+}
+
+// ── Source / FPS ──
+function setSource(m) {
+  $('camCfg').style.display = m==='cam' ? '' : 'none';
+  $('fileCfg').style.display = m==='file' ? '' : 'none';
+  $('bFile').style.background = m==='file' ? 'rgba(0,204,230,.2)' : '';
+  $('bCam').style.background = m==='cam' ? 'rgba(0,204,230,.2)' : '';
+  if (m==='cam') ctrl('set_source', {source_type:'local', camera_id:parseInt($('camSel').value)||0});
+}
+function setFps(f) {
+  ctrl('fps', {fps:f});
+  $('b30').style.background = f===30 ? 'rgba(51,204,102,.2)' : '';
+  $('b60').style.background = f===60 ? 'rgba(51,204,102,.2)' : '';
+}
+$('fUpload').onchange = async e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const fd = new FormData(); fd.append('file', file);
+  $('pEmpty').textContent = 'uploading...'; $('pEmpty').style.display = '';
+  const r = await fetch('/api/upload', {method:'POST', body:fd});
+  const j = await r.json();
+  $('pEmpty').textContent = j.error || 'source active';
+};
+$('camSel').onchange = () => ctrl('set_source', {source_type:'local', camera_id:parseInt($('camSel').value)||0});
+
+// ── Filters ──
+const fmap = { fB:'brightness', fC:'contrast', fS:'saturation', fG:'gamma' };
+function fsend() {
+  ctrl('filters', {
+    brightness: $('fB').value/100,
+    contrast: $('fC').value/100,
+    saturation: $('fS').value/100,
+    gamma: $('fG').value/100,
+  });
+}
+['fB','fC','fS','fG'].forEach(id => {
+  $(id).oninput = () => { $(id+'v').textContent = (parseInt($(id).value)/100).toFixed(2); fsend(); };
+});
+function resetFilters() {
+  [['fB',0],['fC',100],['fS',100],['fG',100]].forEach(([id,v]) => {
+    $(id).value = v; $(id+'v').textContent = (v/100).toFixed(2);
+  });
+  fsend();
+}
+
+// ── Playback ──
+function pb(a) { ctrl('playback', {action:a}); }
+$('speed').oninput = () => {
+  $('speedL').textContent = $('speed').value + '%';
+  ctrl('playback', {action:'speed', speed:parseInt($('speed').value)/100});
+};
+function toggleLoop() {
+  loop = !loop;
+  $('bLoop').style.borderColor = loop ? 'var(--ice)' : '';
+  ctrl('playback', {action:'loop', enabled:loop});
+}
+
+// ── Polling ──
+async function loadCams() {
+  try {
+    const r = await fetch('/api/cameras'); const cams = await r.json();
+    $('camSel').innerHTML = '';
+    let obs = 0;
+    cams.forEach((c,i) => {
+      const o = document.createElement('option'); o.value=i; o.textContent=c;
+      $('camSel').appendChild(o);
+      if (!obs && c.toLowerCase().includes('obs')) obs = i;
+    });
+    $('camSel').value = obs;
+  } catch(e) {}
+}
+async function poll() {
+  try {
+    const r = await fetch('/api/stats');
+    if (!r.ok) return;
+    const s = await r.json();
+    const d = $('tweakDot'), l = $('tweakLabel');
+    if (s.connected) { d.className='pulse online'; l.textContent='CONNECTED'; l.style.color='var(--green)'; }
+    else { d.className='pulse offline'; l.textContent='OFFLINE'; l.style.color='var(--red)'; }
+    $('cSource').textContent = s.source;
+    $('cEncode').textContent = s.encode;
+    $('sFps').textContent = s.fps;
+    $('sSent').textContent = s.mb_sent.toFixed(1) + ' MB';
+    $('sUp').textContent = fmtUp(s.uptime);
+    if (s.running) {
+      $('pImg').style.display = '';
+      $('pEmpty').style.display = 'none';
+      $('pImg').src = '/preview.jpg?t=' + Date.now();
+    } else {
+      $('pImg').style.display = 'none';
+      if (!$('pEmpty').textContent.includes('uploading')) $('pEmpty').textContent = 'no source active';
+      $('pEmpty').style.display = '';
+    }
+    if (s.src_error) {
+      $('errHint').style.display = '';
+      $('errHint').textContent = '⚠ ' + s.src_error;
+    } else $('errHint').style.display = 'none';
+  } catch(e) {}
+}
+function fmtUp(s) {
+  const m = Math.floor(s/60), sec = s%60;
+  return String(m).padStart(2,'0')+':'+String(sec).padStart(2,'0');
+}
+loadCams(); poll(); setInterval(poll, 500);
+</script>
+</body>
+</html>
