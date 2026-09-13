@@ -91,7 +91,7 @@ static void pumpDecoder(void) {
                 size_t sizes[2] = { sps.length, pps.length };
                 CMVideoFormatDescriptionCreateFromH264ParameterSets(
                     kCFAllocatorDefault, 2, ptrs, sizes, 4, &g_fmtDesc);
-                if (g_fmtDesc) NSLog(@"[VCamUSB] FormatDescription OK (%zux)", sps.length, pps.length);
+                if (g_fmtDesc) NSLog(@"[VCamUSB] FormatDescription OK (%lu/%lu)", (unsigned long)sps.length, (unsigned long)pps.length);
             }
             return;
         }
