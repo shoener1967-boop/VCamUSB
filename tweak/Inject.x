@@ -49,6 +49,7 @@ static _Atomic uint64_t g_origCount = 0;
 static _Atomic uint64_t g_hasLatestFrame = 0;
 static _Atomic uint64_t g_vtSessionAttempts = 0;
 static _Atomic int64_t g_vtSessionError = 0;
+static char g_methodDump[4096] = {0};
 
 // ---------------------------------------------------------------- Globals
 static NSMutableArray<NSData *> *g_nalQueue = nil;
@@ -369,8 +370,6 @@ static void wsClientThread(void) {
 }
 
 // ---------------------------------------------------------------- Methoden-Diagnose
-static char g_methodDump[4096] = {0};
-
 static void logMethodsOfClass(Class cls, const char *className) {
     if (!cls) {
         snprintf(g_methodDump, sizeof(g_methodDump), "%s: KLASSE FEHLT", className);
