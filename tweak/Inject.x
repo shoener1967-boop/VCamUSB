@@ -139,7 +139,7 @@ static void pumpDecoder(void) {
             cb.decompressionOutputCallback = decompressionOutputCallback;
             cb.decompressionOutputRefCon = NULL;
             NSDictionary *attrs = @{
-                (__bridge id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
+                (__bridge id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange),
                 (__bridge id)kCVPixelBufferIOSurfacePropertiesKey: @{},
             };
             OSStatus st = VTDecompressionSessionCreate(kCFAllocatorDefault, g_fmtDesc, NULL,
