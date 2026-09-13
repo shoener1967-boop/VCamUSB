@@ -217,33 +217,52 @@ static void wsServerThread(void) {
 }
 
 // ---------------------------------------------------------------- Floating Circle
+// Pass-through-Window: fängt Touches nur auf echten Controls ab, Rest geht durch.
+@interface VCamWindow : UIWindow
+@end
+
+@implementation VCamWindow
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    if (hit == self || hit == self.rootViewController.view) {
+        return nil; // durchlassen
+    }
+    return hit;
+}
+@end
+
 @interface VCamFloatVC : UIViewController
 @end
 
 @implementation VCamFloatVC {
     UIView *_menuView;
     BOOL _menuOpen;
+    UIButton *_circleBtn;
+    CGPoint _circleCenter;
 }
 
 - (void)loadView {
-    self.view = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 60, 60)];
+    self.view = [[UIView alloc] initWithFrame:[UIScreen mainScreen].bounds];
     self.view.backgroundColor = [UIColor clearColor];
-    UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
-    btn.frame = self.view.bounds;
-    btn.layer.cornerRadius = 30;
-    btn.backgroundColor = [UIColor colorWithRed:0.1 green:0.45 blue:0.95 alpha:0.92];
-    btn.titleLabel.font = [UIFont boldSystemFontOfSize:20];
-    [btn setTitle:@"VC" forState:UIControlStateNormal];
-    [btn addTarget:self action:@selector(onTap) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:btn];
+
+    _circleBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    _circleBtn.frame = CGRectMake(0, 0, 60, 60);
+    _circleBtn.layer.cornerRadius = 30;
+    _circleBtn.backgroundColor = [UIColor colorWithRed:0.1 green:0.45 blue:0.95 alpha:0.92];
+    _circleBtn.titleLabel.font = [UIFont boldSystemFontOfSize:20];
+    [_circleBtn setTitle:@"VC" forState:UIControlStateNormal];
+    [_circleBtn addTarget:self action:@selector(onTap) forControlEvents:UIControlEventTouchUpInside];
+    _circleCenter = CGPointMake([UIScreen mainScreen].bounds.size.width - 40, 230);
+    _circleBtn.center = _circleCenter;
+    [self.view addSubview:_circleBtn];
 
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(onDrag:)];
-    [self.view addGestureRecognizer:pan];
+    [_circleBtn addGestureRecognizer:pan];
     _menuOpen = NO;
 }
 
-// Eigenes Inline-Menü statt UIAlertController (der killt das Fenster in SpringBoard)
 - (void)onTap {
+    vlog([NSString stringWithFormat:@"[VCamUSB] Tap! Frames=%d", g_frameCount]);
     if (_menuOpen) {
         [_menuView removeFromSuperview];
         _menuView = nil;
@@ -251,7 +270,15 @@ static void wsServerThread(void) {
         return;
     }
     _menuOpen = YES;
-    _menuView = [[UIView alloc] initWithFrame:CGRectMake(-180, 70, 250, 180)];
+    // Menü unterhalb/neben dem Kreis platzieren (clamped an den Screen)
+    CGRect screen = [UIScreen mainScreen].bounds;
+    CGFloat mx = _circleBtn.center.x - 125;
+    CGFloat my = _circleBtn.center.y + 40;
+    if (mx < 10) mx = 10;
+    if (mx + 250 > screen.size.width - 10) mx = screen.size.width - 260;
+    if (my + 190 > screen.size.height - 10) my = _circleBtn.center.y - 230;
+
+    _menuView = [[UIView alloc] initWithFrame:CGRectMake(mx, my, 250, 180)];
     _menuView.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.95];
     _menuView.layer.cornerRadius = 14;
     _menuView.clipsToBounds = YES;
@@ -272,42 +299,37 @@ static void wsServerThread(void) {
         [_menuView addSubview:b];
     }
     [self.view addSubview:_menuView];
-    // Fenster vergrößern, damit das Menü sichtbar ist
-    self.view.frame = CGRectMake(self.view.frame.origin.x, self.view.frame.origin.y, 250, 260);
 }
 
 - (void)menuAction:(UIButton *)sender {
     switch (sender.tag) {
-        case 0: NSLog(@"[VCamUSB] Modus: USB"); break;
-        case 1: NSLog(@"[VCamUSB] Modus: WLAN"); break;
-        case 2: NSLog(@"[VCamUSB] Modus: Album"); break;
+        case 0: vlog(@"[VCamUSB] Modus: USB"); break;
+        case 1: vlog(@"[VCamUSB] Modus: WLAN"); break;
+        case 2: vlog(@"[VCamUSB] Modus: Album"); break;
         default: break;
     }
     [_menuView removeFromSuperview];
     _menuView = nil;
     _menuOpen = NO;
-    // Fenster zurückschneiden auf Kreis-Größe
-    self.view.frame = CGRectMake(self.view.frame.origin.x, self.view.frame.origin.y, 60, 60);
-    for (UIView *v in self.view.subviews) {
-        if ([v isKindOfClass:[UIButton class]] && v.frame.size.width == 60) {
-            v.frame = self.view.bounds;
-        }
-    }
 }
 
 - (void)onDrag:(UIPanGestureRecognizer *)pan {
-    static CGPoint startCenter;
     if (pan.state == UIGestureRecognizerStateBegan) {
-        startCenter = self.view.center;
+        _circleCenter = _circleBtn.center;
     }
-    CGPoint t = [pan translationInView:self.view.superview];
-    self.view.center = CGPointMake(startCenter.x + t.x, startCenter.y + t.y);
+    CGPoint t = [pan translationInView:self.view];
+    CGPoint c = CGPointMake(_circleCenter.x + t.x, _circleCenter.y + t.y);
+    CGRect sb = [UIScreen mainScreen].bounds;
+    if (c.x < 40) c.x = 40;
+    if (c.x > sb.size.width - 40) c.x = sb.size.width - 40;
+    if (c.y < 60) c.y = 60;
+    if (c.y > sb.size.height - 40) c.y = sb.size.height - 40;
+    _circleBtn.center = c;
     if (pan.state == UIGestureRecognizerStateEnded) {
-        CGRect sb = [UIScreen mainScreen].bounds;
-        CGPoint c = self.view.center;
-        if (c.x < sb.size.width / 2) c.x = 30 + 10;
-        else c.x = sb.size.width - 30 - 10;
-        [UIView animateWithDuration:0.2 animations:^{ self.view.center = c; }];
+        if (c.x < sb.size.width / 2) c.x = 40;
+        else c.x = sb.size.width - 40;
+        [UIView animateWithDuration:0.2 animations:^{ _circleBtn.center = CGPointMake(c.x, _circleBtn.center.y); }];
+        _circleCenter = _circleBtn.center;
     }
 }
 @end
@@ -329,7 +351,7 @@ static void vlog(NSString *msg) {
     }
 }
 
-static UIWindow *g_floatWindow = nil;
+static VCamWindow *g_floatWindow = nil;
 static VCamFloatVC *g_floatVC = nil;
 
 static void setupFloatingCircle(void) {
@@ -338,42 +360,15 @@ static void setupFloatingCircle(void) {
         if (g_floatVC) return; // nicht doppelt
         CGRect screen = [UIScreen mainScreen].bounds;
 
-        // Weg 1: eigenes Window auf sehr hohem Level
-        UIWindow *win = [[UIWindow alloc] initWithFrame:CGRectMake(screen.size.width - 70, 200, 60, 60)];
+        // Pass-through-Fenster (Vollbild, fängt nur Kreis/Menü-Touches)
+        VCamWindow *win = [[VCamWindow alloc] initWithFrame:screen];
         win.windowLevel = UIWindowLevelStatusBar + 100;
         win.backgroundColor = [UIColor clearColor];
         g_floatVC = [VCamFloatVC new];
         win.rootViewController = g_floatVC;
         win.hidden = NO;
         g_floatWindow = win;
-
-        // Weg 2: zusätzlich als Subview ins SpringBoard-Hauptwindow (Scene-API statt deprecated keyWindow)
-        UIWindow *sbWin = nil;
-        for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if ([scene isKindOfClass:[UIWindowScene class]]) {
-                for (UIWindow *w in scene.windows) {
-                    if (w.isKeyWindow) { sbWin = w; break; }
-                }
-                if (!sbWin && scene.windows.count > 0) sbWin = scene.windows.firstObject;
-                if (sbWin) break;
-            }
-        }
-        if (sbWin && sbWin != win) {
-            UIView *dup = [[UIView alloc] initWithFrame:CGRectMake(screen.size.width - 70, 200, 60, 60)];
-            dup.backgroundColor = [UIColor colorWithRed:0.1 green:0.45 blue:0.95 alpha:0.92];
-            dup.layer.cornerRadius = 30;
-            UILabel *lbl = [[UILabel alloc] initWithFrame:dup.bounds];
-            lbl.text = @"VC";
-            lbl.textColor = [UIColor whiteColor];
-            lbl.textAlignment = NSTextAlignmentCenter;
-            lbl.font = [UIFont boldSystemFontOfSize:20];
-            [dup addSubview:lbl];
-            [sbWin.rootViewController.view addSubview:dup];
-            vlog(@"[VCamUSB] Kreis auch als Subview ins SpringBoard-Window gelegt");
-        } else {
-            vlog(@"[VCamUSB] kein KeyWindow gefunden, nur eigenes Window");
-        }
-        vlog([NSString stringWithFormat:@"[VCamUSB] Window created, level=%.0f", (double)win.windowLevel]);
+        vlog(@"[VCamUSB] Pass-through-Window aktiv (level 1100)");
     });
 }
 
