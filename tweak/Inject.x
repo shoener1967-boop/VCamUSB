@@ -206,7 +206,10 @@ static CMSampleBufferRef buildSwapSampleBuffer(void) {
     return sb;
 }
 
-// ---------------------------------------------------------------- FigCapture-Hook
+// ---------------------------------------------------------------- Frame-Hooks
+// LordVCAM-Referenz hookt BEIDE Klassen. Der aktive iOS-16-Kamerapfad ist
+// BWNodeOutput (FigCaptureClientSessionMonitor.emitSampleBuffer: wird von der
+// Kamera-App nicht aufgerufen — emit=0 in der Telemetrie).
 %hook FigCaptureClientSessionMonitor
 - (void)emitSampleBuffer:(id)sampleBuffer {
     atomic_fetch_add(&g_emitCalls, 1);
@@ -225,6 +228,20 @@ static CMSampleBufferRef buildSwapSampleBuffer(void) {
     CMSampleBufferRef fake = buildSwapSampleBuffer();
     if (fake) {
         %orig((__bridge id)fake);
+        CFRelease(fake);
+        return;
+    }
+    atomic_fetch_add(&g_origCount, 1);
+    %orig;
+}
+%end
+
+%hook BWNodeOutput
+- (void)emitSampleBuffer:(CMSampleBufferRef)sampleBuffer {
+    atomic_fetch_add(&g_emitCalls, 1);
+    CMSampleBufferRef fake = buildSwapSampleBuffer();
+    if (fake) {
+        %orig(fake);
         CFRelease(fake);
         return;
     }
