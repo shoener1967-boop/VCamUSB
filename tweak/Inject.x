@@ -152,25 +152,27 @@ static void pumpDecoder(void) {
 
         // --- AVCC-Block bauen: [4-Byte-Länge][NAL] (KEIN Annex-B-Startcode!) ---
         uint32_t nalLen = htonl((uint32_t)nal.length);
-        NSMutableData *block = [NSMutableData dataWithBytes:&nalLen length:4];
-        [block appendData:nal];
+        size_t blockLen = 4 + (size_t)nal.length;
+        uint8_t *blockBuf = malloc(blockLen);
+        if (!blockBuf) return;
+        memcpy(blockBuf, &nalLen, 4);
+        memcpy(blockBuf + 4, nal.bytes, nal.length);
 
         CMBlockBufferRef bb = NULL;
-        CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault, NULL, block.length,
-            kCFAllocatorDefault, NULL, 0, block.length, 0, &bb);
-        if (!bb) return;
-        char *dst = NULL;
-        size_t lenAtOffset = 0, totalLen = 0;
-        if (CMBlockBufferGetDataPointer(bb, 0, &lenAtOffset, &totalLen, &dst) != kCMBlockBufferNoErr
-            || !dst || lenAtOffset < block.length) {
-            CFRelease(bb);
+        OSStatus bbSt = CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault, blockBuf, blockLen,
+            kCFAllocatorDefault, NULL, 0, blockLen, 0, &bb);
+        if (bbSt != kCMBlockBufferNoErr || !bb) {
+            L("BlockBuffer FAIL: %d", (int)bbSt);
+            free(blockBuf);
             return;
         }
-        memcpy(dst, block.bytes, block.length);
         CMSampleBufferRef sb = NULL;
-        CMSampleBufferCreate(kCFAllocatorDefault, bb, true, NULL, NULL, g_fmtDesc, 1, 0, NULL, 0, NULL, &sb);
+        OSStatus sbSt = CMSampleBufferCreate(kCFAllocatorDefault, bb, true, NULL, NULL, g_fmtDesc, 1, 0, NULL, 0, NULL, &sb);
         CFRelease(bb);
-        if (!sb) return;
+        if (sbSt != noErr || !sb) {
+            L("SampleBuffer FAIL: %d", (int)sbSt);
+            return;
+        }
         atomic_fetch_add(&g_decodeSubmitCount, 1);
         VTDecompressionSessionDecodeFrame(g_vtSession, sb, 0, NULL, NULL);
         CFRelease(sb);
