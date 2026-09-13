@@ -32,7 +32,8 @@ jobs:
           export THEOS=$HOME/theos
           xcrun -sdk iphoneos clang -arch arm64 -isysroot $(xcrun -sdk iphoneos --show-sdk-path) -o dlopen_test dlopen_test.c
           xcrun -sdk iphoneos clang -arch arm64 -isysroot $(xcrun -sdk iphoneos --show-sdk-path) -o dylib_probe dylib_probe.c
-          ldid -S dlopen_test dylib_probe
+          xcrun -sdk iphoneos clang -arch arm64 -isysroot $(xcrun -sdk iphoneos --show-sdk-path) -o connect_test connect_test.c
+          ldid -S dlopen_test dylib_probe connect_test
 
       - name: Upload .deb
         uses: actions/upload-artifact@v4
@@ -42,3 +43,4 @@ jobs:
             tweak/packages/*.deb
             server/dlopen_test
             server/dylib_probe
+            server/connect_test
