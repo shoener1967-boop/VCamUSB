@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <mach/mach.h>
-#include <mach/mach_vm.h>
 #include <mach-o/dyld_images.h>
 
 int main(int argc, char **argv) {
@@ -31,26 +30,30 @@ int main(int argc, char **argv) {
     if (!infos) { fprintf(stderr, "no all_image_info\n"); return 1; }
 
     uint32_t imageCount = 0;
-    kr = mach_vm_read_overwrite(task, (mach_vm_address_t)&infos->infoArrayCount,
-        sizeof(imageCount), (mach_vm_address_t)&imageCount, &count);
-    if (kr != KERN_SUCCESS) { fprintf(stderr, "read count failed\n"); return 1; }
+    vm_size_t count2 = sizeof(imageCount);
+    kr = vm_read_overwrite(task, (vm_address_t)&infos->infoArrayCount,
+        (vm_size_t)sizeof(imageCount), (vm_address_t)&imageCount, &count2);
+    if (kr != KERN_SUCCESS) { fprintf(stderr, "read count failed: %s\n", mach_error_string(kr)); return 1; }
 
     uint64_t arrayAddr = 0;
-    kr = mach_vm_read_overwrite(task, (mach_vm_address_t)&infos->infoArray,
-        sizeof(arrayAddr), (mach_vm_address_t)&arrayAddr, &count);
-    if (kr != KERN_SUCCESS) { fprintf(stderr, "read array failed\n"); return 1; }
+    count2 = sizeof(arrayAddr);
+    kr = vm_read_overwrite(task, (vm_address_t)&infos->infoArray,
+        (vm_size_t)sizeof(arrayAddr), (vm_address_t)&arrayAddr, &count2);
+    if (kr != KERN_SUCCESS) { fprintf(stderr, "read array failed: %s\n", mach_error_string(kr)); return 1; }
 
     printf("imageCount=%u\n", imageCount);
     for (uint32_t i = 0; i < imageCount; i++) {
         // dyld_image_info: mach_header* (8), path* (8), modification (8)
         uint64_t entry[3] = {0};
-        kr = mach_vm_read_overwrite(task, (mach_vm_address_t)(arrayAddr + i * 24),
-            sizeof(entry), (mach_vm_address_t)entry, &count);
+        count2 = sizeof(entry);
+        kr = vm_read_overwrite(task, (vm_address_t)(arrayAddr + i * 24),
+            (vm_size_t)sizeof(entry), (vm_address_t)entry, &count2);
         if (kr != KERN_SUCCESS) continue;
 
         char path[512] = {0};
-        kr = mach_vm_read_overwrite(task, (mach_vm_address_t)entry[1],
-            sizeof(path) - 1, (mach_vm_address_t)path, &count);
+        count2 = sizeof(path) - 1;
+        kr = vm_read_overwrite(task, (vm_address_t)entry[1],
+            (vm_size_t)(sizeof(path) - 1), (vm_address_t)path, &count2);
         if (kr != KERN_SUCCESS) continue;
         path[511] = 0;
 
