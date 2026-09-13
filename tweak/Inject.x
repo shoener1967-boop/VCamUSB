@@ -17,6 +17,7 @@
 #import <CoreVideo/CoreVideo.h>
 #import <CoreMedia/CoreMedia.h>
 #import <VideoToolbox/VideoToolbox.h>
+#import <Accelerate/Accelerate.h>
 #import <substrate.h>
 #import <objc/runtime.h>
 #import <sys/socket.h>
@@ -207,7 +208,8 @@ static void ensureTargetPool(void) {
     else L("Target-Pool OK %zux%zu", g_targetW, g_targetH);
 }
 
-// Simple Nearest-Neighbor-Skalierung für NV12 (Y + CbCr bi-planar), stride-aware.
+// vImage-basierte NV12-Skalierung: Y-Plane mit vImageScale_Planar8,
+// interleaved CbCr-Plane mit vImageScale_CbCr8 (korrekte Chroma-Paar-Behandlung).
 static void scaleNV12(CVPixelBufferRef src, CVPixelBufferRef dst) {
     size_t sw = CVPixelBufferGetWidth(src);
     size_t sh = CVPixelBufferGetHeight(src);
@@ -218,33 +220,35 @@ static void scaleNV12(CVPixelBufferRef src, CVPixelBufferRef dst) {
     CVPixelBufferLockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
     CVPixelBufferLockBaseAddress(dst, 0);
 
-    // Y-Plane
-    const uint8_t *sy = CVPixelBufferGetBaseAddressOfPlane(src, 0);
-    uint8_t *dy = CVPixelBufferGetBaseAddressOfPlane(dst, 0);
-    size_t sYstride = CVPixelBufferGetBytesPerRowOfPlane(src, 0);
-    size_t dYstride = CVPixelBufferGetBytesPerRowOfPlane(dst, 0);
-    for (size_t y = 0; y < dh; y++) {
-        size_t syIdx = (y * sh) / dh;
-        const uint8_t *srow = sy + syIdx * sYstride;
-        uint8_t *drow = dy + y * dYstride;
-        for (size_t x = 0; x < dw; x++) {
-            drow[x] = srow[(x * sw) / dw];
-        }
-    }
+    // Y-Plane (vImageScale_Planar8)
+    vImage_Buffer srcY = {
+        .data = CVPixelBufferGetBaseAddressOfPlane(src, 0),
+        .height = sh,
+        .width = sw,
+        .rowBytes = CVPixelBufferGetBytesPerRowOfPlane(src, 0),
+    };
+    vImage_Buffer dstY = {
+        .data = CVPixelBufferGetBaseAddressOfPlane(dst, 0),
+        .height = dh,
+        .width = dw,
+        .rowBytes = CVPixelBufferGetBytesPerRowOfPlane(dst, 0),
+    };
+    vImageScale_Planar8(&srcY, &dstY, NULL, kvImageNoFlags);
 
-    // UV-Plane (CbCr, interleaved, halbe Höhe)
-    const uint8_t *suv = CVPixelBufferGetBaseAddressOfPlane(src, 1);
-    uint8_t *duv = CVPixelBufferGetBaseAddressOfPlane(dst, 1);
-    size_t sUVstride = CVPixelBufferGetBytesPerRowOfPlane(src, 1);
-    size_t dUVstride = CVPixelBufferGetBytesPerRowOfPlane(dst, 1);
-    for (size_t y = 0; y < dh / 2; y++) {
-        size_t syIdx = (y * (sh / 2)) / (dh / 2);
-        const uint8_t *srow = suv + syIdx * sUVstride;
-        uint8_t *drow = duv + y * dUVstride;
-        for (size_t x = 0; x < dw; x++) {
-            drow[x] = srow[(x * sw) / dw];
-        }
-    }
+    // CbCr-Plane (interleaved, vImageScale_CbCr8)
+    vImage_Buffer srcUV = {
+        .data = CVPixelBufferGetBaseAddressOfPlane(src, 1),
+        .height = sh / 2,
+        .width = sw,
+        .rowBytes = CVPixelBufferGetBytesPerRowOfPlane(src, 1),
+    };
+    vImage_Buffer dstUV = {
+        .data = CVPixelBufferGetBaseAddressOfPlane(dst, 1),
+        .height = dh / 2,
+        .width = dw,
+        .rowBytes = CVPixelBufferGetBytesPerRowOfPlane(dst, 1),
+    };
+    vImageScale_CbCr8(&srcUV, &dstUV, NULL, kvImageNoFlags);
 
     CVPixelBufferUnlockBaseAddress(dst, 0);
     CVPixelBufferUnlockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
