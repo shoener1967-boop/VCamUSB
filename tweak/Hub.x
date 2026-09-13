@@ -223,8 +223,6 @@ static void setupFloatingButton(void) {
     [g_floatingButton setTitle:@"●" forState:UIControlStateNormal];
     [g_floatingButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     g_floatingButton.titleLabel.font = [UIFont boldSystemFontOfSize:26];
-    [g_floatingButton addTarget:nil action:nil forControlEvents:UIControlEventTouchUpInside];
-    // Touch-Responder: eigener Selector über Category nicht nötig — Button sichtbar reicht
     [root.view addSubview:g_floatingButton];
 
     [g_buttonWindow makeKeyAndVisible];
