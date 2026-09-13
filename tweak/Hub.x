@@ -300,6 +300,8 @@ static void bannerSetup(void) {
     // Diagnose-Marker schreiben (sichtbar via /tmp)
     NSString *m = [NSString stringWithFormat:@"banner created pid=%d\n", getpid()];
     [m writeToFile:@"/tmp/vcam_banner.txt" atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    FILE *bf = fopen("/tmp/vcam_banner2.txt", "a");
+    if (bf) { fprintf(bf, "bannerSetup ran pid=%d\n", getpid()); fclose(bf); }
 }
 
 // ---------------------------------------------------------------- Entry
@@ -307,6 +309,11 @@ __attribute__((constructor))
 static void vcamhub_init(void) {
     NSString *proc = [[NSProcessInfo processInfo] processName];
     L("injiziert in %@ (pid=%d)", proc, getpid());
+
+    // Diagnose: fopen-Marker sofort (Constructor lief?)
+    FILE *mf = fopen("/tmp/vcamhub_ctor.txt", "a");
+    if (mf) { fprintf(mf, "ctor proc=%s pid=%d\n", [proc UTF8String], getpid()); fclose(mf); }
+
     if (![proc isEqualToString:@"SpringBoard"]) return;
 
     // Banner verzögert starten (SpringBoard braucht einen Moment zum Hochfahren)
