@@ -9,21 +9,24 @@ include $(THEOS)/makefiles/common.mk
 #   VCamInject -> mediaserverd (WS-Client + Decode + FigCapture-Frame-Swap)
 TWEAK_NAME := VCamHub VCamInject VCamProbe
 
-# roothide-RPATHs — kritisch: ohne die kann mediaserverd die Dylib nicht
-# dlopen'en, weil @loader_path/.jbroot/... vom Daemon-Pfad aus falsch zeigt.
+# WICHTIG: Substrate als FRAMEWORK linken (nicht als -lsubstrate Library)!
+# Das produziert @rpath/CydiaSubstrate.framework/CydiaSubstrate wie bei den
+# funktionierenden Tweaks (VoiceChangerX, LordVCAM). Die Library-Variante
+# erzeugt @loader_path/.jbroot/usr/lib/libsubstrate.dylib, das mediaserverd
+# nicht auflösen kann -> dlopen schlägt fehl -> Tweak wird nicht geladen.
 VCamHub_CFLAGS := -fobjc-arc -Wno-unused-variable
 VCamHub_FILES := Hub.x
+VCamHub_FRAMEWORKS := CydiaSubstrate
 VCamHub_LDFLAGS := -Wl,-rpath,@loader_path/.jbroot/usr/lib -Wl,-rpath,@loader_path/.jbroot/Library/Frameworks
 
 VCamInject_FILES := Inject.x
 VCamInject_CFLAGS := -fobjc-arc -Wno-unused-variable
-VCamInject_LIBRARIES := substrate
-VCamInject_FRAMEWORKS := CoreVideo CoreMedia VideoToolbox
+VCamInject_FRAMEWORKS := CydiaSubstrate CoreVideo CoreMedia VideoToolbox
 VCamInject_LDFLAGS := -Wl,-rpath,@loader_path/.jbroot/usr/lib -Wl,-rpath,@loader_path/.jbroot/Library/Frameworks
 
 VCamProbe_FILES := Probe.x
 VCamProbe_CFLAGS := -fobjc-arc -Wno-unused-variable
-VCamProbe_LIBRARIES := substrate
+VCamProbe_FRAMEWORKS := CydiaSubstrate
 VCamProbe_LDFLAGS := -Wl,-rpath,@loader_path/.jbroot/usr/lib -Wl,-rpath,@loader_path/.jbroot/Library/Frameworks
 
 include $(THEOS_MAKE_PATH)/tweak.mk
