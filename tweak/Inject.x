@@ -765,9 +765,10 @@ static void dumpWildcardClasses(void) {
 
     const char *patterns[] = {
         "BWStillImage", "StillImage", "BWPhoto", "Photo", "Movie", "Recording",
-        "BWVideo", "Capture", "Sink", "Scaler"
+        "BWVideo", "Capture", "Sink", "Scaler", "BWNode", "FigCapture", "FigStillImage"
     };
     int npat = sizeof(patterns) / sizeof(patterns[0]);
+    int classCount = 0;
 
     for (int i = 0; i < count && off < sizeof(g_sinkClasses) - 400; i++) {
         Class cls = classes[i];
@@ -777,6 +778,7 @@ static void dumpWildcardClasses(void) {
             if (strstr(name, patterns[p])) { match = YES; break; }
         }
         if (!match) continue;
+        classCount++;
 
         // Methoden dieser Klasse mit SampleBuffer/PixelBuffer/emit/output im Namen
         unsigned int mc = 0;
@@ -795,9 +797,10 @@ static void dumpWildcardClasses(void) {
     }
     free(classes);
     if (off == (size_t)snprintf(g_sinkClasses, 8, "Sinks: ")) {
-        snprintf(g_sinkClasses, sizeof(g_sinkClasses), "Sinks: keine Foto/Video-Klassen gefunden");
+        snprintf(g_sinkClasses, sizeof(g_sinkClasses),
+            "Sinks: KEINE Klassen (%d Klassen insgesamt, %d gematcht)", count, classCount);
     }
-    L("Sink-Klassen-Diagnose fertig");
+    L("Sink-Klassen-Diagnose fertig (%d gematcht)", classCount);
 }
 
 // ---------------------------------------------------------------- ctor
