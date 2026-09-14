@@ -5,7 +5,7 @@
 #
 # Build:  make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
 TARGET := iphone:clang:latest:13.0
-TWEAK_NAME := VCamHub VCamInject VCamProbe VCamAVF
+TWEAK_NAME := VCamHub VCamInject VCamProbe VCamAVF DeviceDump
 
 # ---- Hub: kein Substrate (constructor + Notification-Observer), UIKit für UIWindow
 VCamHub_FILES := Hub.x
@@ -26,6 +26,11 @@ VCamAVF_FRAMEWORKS := CydiaSubstrate CoreMedia AVFoundation
 VCamProbe_FILES := Probe.x
 VCamProbe_CFLAGS := -fobjc-arc -Wno-unused-variable
 VCamProbe_FRAMEWORKS := CydiaSubstrate
+
+# ---- DeviceDump: AVCaptureDevice-Liste ausgeben (Diagnose virtuelle Kamera)
+DeviceDump_FILES := DeviceDump.x
+DeviceDump_CFLAGS := -fobjc-arc -Wno-unused-variable
+DeviceDump_FRAMEWORKS := AVFoundation
 
 include $(THEOS)/makefiles/common.mk
 include $(THEOS_MAKE_PATH)/tweak.mk
