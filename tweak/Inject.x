@@ -26,6 +26,7 @@
 #import <netinet/in.h>
 #import <arpa/inet.h>
 #import <stdatomic.h>
+#import <time.h>
 #import <os/log.h>
 #import <pthread.h>
 
@@ -67,6 +68,11 @@ static char g_selectorDump[8192] = {0};
 // Modus-Steuerung über WS-Textnachrichten (Marker-Dateien funktionieren nicht,
 // weil mediaserverd eine andere /tmp-Sicht hat als die SSH-Shell!)
 static _Atomic int g_modeBW = 1;
+static _Atomic int g_replacementEnabled = 1;
+static _Atomic int g_photoInProgress = 0;
+static _Atomic int g_recordingInProgress = 0;
+static _Atomic uint64_t g_swapSkippedPhoto = 0;
+static _Atomic uint64_t g_swapSkippedRecording = 0;
 static _Atomic int g_modeWrapOrig = 0;
 static _Atomic int g_modeTestPattern = 0;
 static _Atomic int g_modeFigEmit = 0;
@@ -693,6 +699,24 @@ static void trackObject(id self) {
         %orig;
         return;
     }
+    // SICHERHEIT: Während Foto-/Recording-Capture KEIN in-place-Swap.
+    // Der Original-Buffer wird dann für Still-/Movie-Verarbeitung weiterverwendet.
+    if (!atomic_load(&g_replacementEnabled)) {
+        %orig;
+        return;
+    }
+    if (atomic_load(&g_photoInProgress)) {
+        atomic_fetch_add(&g_swapSkippedPhoto, 1);
+        atomic_fetch_add(&g_origCount, 1);
+        %orig;
+        return;
+    }
+    if (atomic_load(&g_recordingInProgress)) {
+        atomic_fetch_add(&g_swapSkippedRecording, 1);
+        atomic_fetch_add(&g_origCount, 1);
+        %orig;
+        return;
+    }
 
     // Einmalig: Original-Pixel-Format + Dimensionen erfassen (Diagnose)
     if (atomic_load(&g_origPixelFormat) == 0) {
@@ -725,6 +749,38 @@ static void trackObject(id self) {
 }
 %end
 
+// ---------------------------------------------------------------- Foto-Capture-State-Erkennung
+// Setzt g_photoInProgress, damit der Preview-Hook während Still Capture
+// NICHT den Original-Buffer in-place überschreibt (Freeze-Vermeidung).
+// Da AVCapturePhotoOutput im App-Prozess läuft (nicht mediaserverd), wird
+// der Hook hier evtl. nicht feuern. Deshalb zusätzlich zeitbasierter Auto-Reset:
+// das Flag bleibt max. 2s aktiv, danach wieder Replacement erlaubt.
+static _Atomic int64_t g_photoResetAt = 0;
+
+static void armPhotoGuard(void) {
+    atomic_store(&g_photoInProgress, 1);
+    atomic_store(&g_photoResetAt, (int64_t)time(NULL) + 2);
+    L("Foto-Capture START (Guard 2s)");
+}
+
+static void maybeResetPhotoGuard(void) {
+    if (atomic_load(&g_photoInProgress) &&
+        time(NULL) >= atomic_load(&g_photoResetAt)) {
+        atomic_store(&g_photoInProgress, 0);
+    }
+}
+
+%hook AVCapturePhotoOutput
+- (void)capturePhotoWithSettings:(id)settings delegate:(id)delegate {
+    armPhotoGuard();
+    %orig;
+}
+- (void)capturePhotoWithSettings:(id)settings delegate:(id)delegate completionHandler:(id)handler {
+    armPhotoGuard();
+    %orig;
+}
+%end
+
 // ---------------------------------------------------------------- Status-Server (8769)
 static void statusServerThread(void) {
     int srv = socket(AF_INET, SOCK_STREAM, 0);
@@ -747,6 +803,7 @@ static void statusServerThread(void) {
             "wsBin=%llu wsText=%llu wsBytes=%llu "
             "formatDesc=%llu submit=%llu output=%llu errors=%llu "
             "emit=%llu send=%llu figEmitRep=%llu figSendRep=%llu build=%llu swap=%llu swapMismatch=%llu inplace=%llu inplaceMis=%llu inplaceScale=%llu orig=%llu hasFrame=%llu "
+            "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d "
             "vtAttempts=%llu vtError=%lld\n",
             (unsigned long long)atomic_load(&g_rxNalCount),
             (unsigned long long)atomic_load(&g_spsCount),
@@ -771,6 +828,11 @@ static void statusServerThread(void) {
             (unsigned long long)atomic_load(&g_inplaceScaled),
             (unsigned long long)atomic_load(&g_origCount),
             (unsigned long long)atomic_load(&g_hasLatestFrame),
+            (int)atomic_load(&g_photoInProgress),
+            (int)atomic_load(&g_recordingInProgress),
+            (unsigned long long)atomic_load(&g_swapSkippedPhoto),
+            (unsigned long long)atomic_load(&g_swapSkippedRecording),
+            (int)atomic_load(&g_replacementEnabled),
             (unsigned long long)atomic_load(&g_vtSessionAttempts),
             (long long)atomic_load(&g_vtSessionError));
         int fw = snprintf(msg + w, sizeof(msg) - w, " origFmt=0x%08x origSize=%lldx%lld decodedFmt=0x%08x decodedSize=%lldx%lld dStride=%lld/%lld pt=%llu/%llu/%llu/%llu\n",
@@ -999,6 +1061,12 @@ static void wsClientThread(void) {
                             atomic_store(&g_modeFigEmit, 0);
                             atomic_store(&g_modeFigSend, 0);
                             L("Modus: OBSERVE");
+                        } else if ([cmd isEqualToString:@"mode:replacement_off"]) {
+                            atomic_store(&g_replacementEnabled, 0);
+                            L("Modus: REPLACEMENT_OFF");
+                        } else if ([cmd isEqualToString:@"mode:replacement_on"]) {
+                            atomic_store(&g_replacementEnabled, 1);
+                            L("Modus: REPLACEMENT_ON");
                         } else if ([cmd isEqualToString:@"mode:redump"]) {
                             // Diagnose erneut ausführen (nach Kamera-Start, Klassen jetzt geladen)
                             dumpWildcardClasses();
@@ -1212,6 +1280,7 @@ static void dumpWildcardClasses(void) {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
         while (1) {
             pumpDecoder();
+            maybeResetPhotoGuard();
             usleep(2500);
         }
     });
