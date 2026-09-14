@@ -58,6 +58,7 @@ static char g_methodDump[4096] = {0};
 static char g_methodDump2[4096] = {0};
 static char g_copyClasses[4096] = {0};
 static char g_sinkClasses[8192] = {0};
+static char g_selectorDump[8192] = {0};
 
 // Modus-Steuerung über WS-Textnachrichten (Marker-Dateien funktionieren nicht,
 // weil mediaserverd eine andere /tmp-Sicht hat als die SSH-Shell!)
@@ -862,7 +863,6 @@ static void dumpCopyNextClasses(void) {
 }
 
 // ---------------------------------------------------------------- LordVCAM-Selector-Besitzer finden
-static char g_selectorDump[8192];
 static void dumpSelectorOwners(void) {
     const char *sels[] = {
         "emitSampleBuffer:",
@@ -962,7 +962,7 @@ static void dumpWildcardClasses(void) {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
         while (1) {
             logMethodsOfClass(NSClassFromString(@"BWNodeOutput"), "BWNodeOutput", g_methodDump);
-            logMethodsOfClass(NSClassFromString(@"FigCaptureClientSessionMonitor"), @"FigCaptureClientSessionMonitor", g_methodDump2);
+            logMethodsOfClass(NSClassFromString(@"FigCaptureClientSessionMonitor"), "FigCaptureClientSessionMonitor", g_methodDump2);
             dumpWildcardClasses();
             dumpCopyNextClasses();
             dumpSelectorOwners();
