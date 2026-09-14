@@ -450,17 +450,43 @@ static pthread_mutex_t g_objMutex = PTHREAD_MUTEX_INITIALIZER;
 
 static void trackObject(id self) {
     pthread_mutex_lock(&g_objMutex);
-    // letzte 8 Objektadressen loggen
+    // Nur EINDEUTIGE Objekte mit Zähler führen: "0xADDR:class:N;"
     const char *cls = object_getClassName(self);
     char entry[128];
-    snprintf(entry, sizeof(entry), "0x%016lx:%s;", (unsigned long)(uintptr_t)self, cls);
-    size_t cur = strlen(g_objectList);
-    if (cur < sizeof(g_objectList) - 130) {
-        strncat(g_objectList, entry, sizeof(g_objectList) - cur - 1);
+    snprintf(entry, sizeof(entry), "0x%016lx:%s:", (unsigned long)(uintptr_t)self, cls);
+    // existiert dieser Eintrag schon?
+    char *found = strstr(g_objectList, entry);
+    if (found) {
+        // Zähler nach ":" erhöhen (direkt hinter dem Namen)
+        char *cnt = strchr(found + strlen(entry), ';');
+        // wir speichern format "ADDR:class:N;" — N suchen
+        char *nStart = found + strlen(entry);
+        char *semi = strchr(nStart, ';');
+        if (semi) {
+            int n = atoi(nStart);
+            // überschreiben: nStart zeigt auf Anfang der Zahl
+            char num[32];
+            snprintf(num, sizeof(num), "%d", n + 1);
+            size_t numlen = strlen(num);
+            // verschieben? Nein — einfach Format ändern: wir speichern feste Breite
+            // einfach: wir rekonstruieren den Eintrag
+            char *semiNext = semi + 1;
+            // String ab semiNext nach links auf nStart+numlen verschieben
+            size_t tailLen = strlen(semiNext) + 1;
+            memmove(nStart + numlen, semiNext, tailLen);
+            memcpy(nStart, num, numlen);
+        }
     } else {
-        // Ring: alte Einträge verwerfen
-        g_objectList[0] = 0;
-        strncat(g_objectList, entry, sizeof(g_objectList) - 1);
+        // neuer Eintrag
+        size_t cur = strlen(g_objectList);
+        char newEntry[160];
+        snprintf(newEntry, sizeof(newEntry), "%s1;", entry);
+        if (cur + strlen(newEntry) < sizeof(g_objectList) - 1) {
+            strncat(g_objectList, newEntry, sizeof(g_objectList) - cur - 1);
+        } else {
+            g_objectList[0] = 0;
+            strncat(g_objectList, newEntry, sizeof(g_objectList) - 1);
+        }
     }
     pthread_mutex_unlock(&g_objMutex);
     atomic_fetch_add(&g_distinctObjects, 1);
