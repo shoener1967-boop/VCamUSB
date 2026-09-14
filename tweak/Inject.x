@@ -267,36 +267,71 @@ static CVPixelBufferRef makeTestPattern(void) {
 
 // ---------------------------------------------------------------- Range-Shift
 // Decoder (libx264) liefert Video-Range (Y 16-235, UV 16-240). Der Kamera-
-// Consumer erwartet Full-Range 420f (Y 0-255, UV 0-255). Konvertierung inline.
-static void shiftToFullRange(CVPixelBufferRef px) {
-    size_t w = CVPixelBufferGetWidth(px);
-    size_t h = CVPixelBufferGetHeight(px);
-    if (!w || !h) return;
+// Consumer erwartet Full-Range 420f (Y 0-255, UV 0-255).
+// WICHTIG: KOPIE statt In-Place — der Decoder-Buffer gehört der VT-Session
+// und wird recycled. LordVCAM nutzt dafür VCCopyPB/blendNV12 in eigenen Buffer.
+static CVPixelBufferPoolRef g_shiftPool = NULL;
 
-    CVPixelBufferLockBaseAddress(px, 0);
-    uint8_t *y = CVPixelBufferGetBaseAddressOfPlane(px, 0);
-    uint8_t *uv = CVPixelBufferGetBaseAddressOfPlane(px, 1);
-    size_t yS = CVPixelBufferGetBytesPerRowOfPlane(px, 0);
-    size_t uvS = CVPixelBufferGetBytesPerRowOfPlane(px, 1);
-    if (!y || !uv) { CVPixelBufferUnlockBaseAddress(px, 0); return; }
+static CVPixelBufferRef copyShiftToFullRange(CVPixelBufferRef src) {
+    size_t w = CVPixelBufferGetWidth(src);
+    size_t h = CVPixelBufferGetHeight(src);
+    OSType fmt = CVPixelBufferGetPixelFormatType(src);
+    if (!w || !h) return NULL;
 
-    // Y: 16..235 -> 0..255
+    if (!g_shiftPool) {
+        NSDictionary *attrs = @{
+            (__bridge id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange),
+            (__bridge id)kCVPixelBufferWidthKey: @(w),
+            (__bridge id)kCVPixelBufferHeightKey: @(h),
+            (__bridge id)kCVPixelBufferIOSurfacePropertiesKey: @{},
+            (__bridge id)kCVPixelBufferMetalCompatibilityKey: @YES,
+        };
+        CVPixelBufferPoolCreate(kCFAllocatorDefault, NULL,
+            (__bridge CFDictionaryRef)attrs, &g_shiftPool);
+    }
+    CVPixelBufferRef dst = NULL;
+    if (!g_shiftPool || CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, g_shiftPool, &dst) != kCVReturnSuccess || !dst) {
+        return NULL;
+    }
+
+    CVPixelBufferLockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
+    CVPixelBufferLockBaseAddress(dst, 0);
+    const uint8_t *sy = CVPixelBufferGetBaseAddressOfPlane(src, 0);
+    const uint8_t *suv = CVPixelBufferGetBaseAddressOfPlane(src, 1);
+    uint8_t *dy = CVPixelBufferGetBaseAddressOfPlane(dst, 0);
+    uint8_t *duv = CVPixelBufferGetBaseAddressOfPlane(dst, 1);
+    size_t syS = CVPixelBufferGetBytesPerRowOfPlane(src, 0);
+    size_t suvS = CVPixelBufferGetBytesPerRowOfPlane(src, 1);
+    size_t dyS = CVPixelBufferGetBytesPerRowOfPlane(dst, 0);
+    size_t duvS = CVPixelBufferGetBytesPerRowOfPlane(dst, 1);
+    if (!sy || !suv || !dy || !duv) {
+        CVPixelBufferUnlockBaseAddress(dst, 0);
+        CVPixelBufferUnlockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
+        CVPixelBufferRelease(dst);
+        return NULL;
+    }
+
+    // Y: 16..235 -> 0..255 (Kopie + Shift)
     for (size_t r = 0; r < h; r++) {
-        uint8_t *row = y + r * yS;
+        const uint8_t *srow = sy + r * syS;
+        uint8_t *drow = dy + r * dyS;
         for (size_t x = 0; x < w; x++) {
-            int v = ((int)row[x] - 16) * 255 / 219;
-            row[x] = (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v));
+            int v = ((int)srow[x] - 16) * 255 / 219;
+            drow[x] = (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v));
         }
     }
-    // Cb/Cr: 16..240 -> 0..255
+    // Cb/Cr: 16..240 -> 0..255 (Kopie + Shift)
     for (size_t r = 0; r < h / 2; r++) {
-        uint8_t *row = uv + r * uvS;
+        const uint8_t *srow = suv + r * suvS;
+        uint8_t *drow = duv + r * duvS;
         for (size_t x = 0; x < w; x++) {
-            int v = ((int)row[x] - 16) * 255 / 224;
-            row[x] = (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v));
+            int v = ((int)srow[x] - 16) * 255 / 224;
+            drow[x] = (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v));
         }
     }
-    CVPixelBufferUnlockBaseAddress(px, 0);
+    CVPixelBufferUnlockBaseAddress(dst, 0);
+    CVPixelBufferUnlockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
+    return dst;
 }
 
 static CMSampleBufferRef buildSwapSampleBuffer(CMSampleBufferRef original) {
@@ -311,11 +346,15 @@ static CMSampleBufferRef buildSwapSampleBuffer(CMSampleBufferRef original) {
         if (g_testPattern) px = CVPixelBufferRetain(g_testPattern);
         atomic_fetch_add(&g_testPatternUsed, 1);
     } else {
-        // Decoder-Buffer sicher holen (Retain unter Lock)
+        // Decoder-Buffer sicher holen (Retain unter Lock), dann KOPIEREN + shiften
         [g_frameLock lock];
         if (g_latestFrame) px = CVPixelBufferRetain(g_latestFrame);
         [g_frameLock unlock];
-        if (px) shiftToFullRange(px);
+        if (px) {
+            CVPixelBufferRef shifted = copyShiftToFullRange(px);
+            CVPixelBufferRelease(px);
+            px = shifted;
+        }
     }
     if (!px) {
         atomic_fetch_add(&g_passthroughOrig, 1);
