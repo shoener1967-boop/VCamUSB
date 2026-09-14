@@ -442,9 +442,33 @@ static _Atomic int64_t g_origPixelFormat = 0;
 static _Atomic int64_t g_origWidth = 0;
 static _Atomic int64_t g_origHeight = 0;
 
+// Objekt-Instanz-Tracking: erkennt getrennte Output-Instanzen (Preview vs Recording vs WebRTC)
+static _Atomic uint64_t g_distinctObjects = 0;
+static char g_objectList[4096] = {0};
+static pthread_mutex_t g_objMutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void trackObject(id self) {
+    pthread_mutex_lock(&g_objMutex);
+    // letzte 8 Objektadressen loggen
+    const char *cls = object_getClassName(self);
+    char entry[128];
+    snprintf(entry, sizeof(entry), "0x%016lx:%s;", (unsigned long)(uintptr_t)self, cls);
+    size_t cur = strlen(g_objectList);
+    if (cur < sizeof(g_objectList) - 130) {
+        strncat(g_objectList, entry, sizeof(g_objectList) - cur - 1);
+    } else {
+        // Ring: alte Einträge verwerfen
+        g_objectList[0] = 0;
+        strncat(g_objectList, entry, sizeof(g_objectList) - 1);
+    }
+    pthread_mutex_unlock(&g_objMutex);
+    atomic_fetch_add(&g_distinctObjects, 1);
+}
+
 %hook BWNodeOutput
 - (void)emitSampleBuffer:(id)sampleBuffer {
     atomic_fetch_add(&g_emitCalls, 1);
+    trackObject(self);
 
     // Einmalig: Original-Pixel-Format + Dimensionen erfassen (Diagnose)
     if (atomic_load(&g_origPixelFormat) == 0) {
@@ -551,6 +575,12 @@ static void statusServerThread(void) {
         }
         if (g_sinkClasses[0]) {
             int mw = snprintf(msg + w, sizeof(msg) - w, "SINKS: %s\n", g_sinkClasses);
+            if (mw > 0) w += mw;
+        }
+        {
+            pthread_mutex_lock(&g_objMutex);
+            int mw = snprintf(msg + w, sizeof(msg) - w, "OBJ: %s\n", g_objectList);
+            pthread_mutex_unlock(&g_objMutex);
             if (mw > 0) w += mw;
         }
         if (atomic_load(&g_handoffDumped)) {
