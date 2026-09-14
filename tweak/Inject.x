@@ -752,25 +752,32 @@ static void dumpCopyNextClasses(void) {
     count = objc_getClassList(classes, count);
     size_t off = 0;
     g_copyClasses[0] = 0;
-    off += snprintf(g_copyClasses + off, sizeof(g_copyClasses) - off, "copyNextSampleBuffer Klassen: ");
+    off += snprintf(g_copyClasses + off, sizeof(g_copyClasses) - off, "copyNext: ");
     int found = 0;
-    for (int i = 0; i < count && off < sizeof(g_copyClasses) - 200; i++) {
+    for (int i = 0; i < count && off < sizeof(g_copyClasses) - 300; i++) {
         Class cls = classes[i];
-        unsigned int mc = 0;
-        Method *methods = class_copyMethodList(cls, &mc);
-        for (unsigned int j = 0; j < mc; j++) {
-            if (method_getName(methods[j]) == sel) {
-                const char *enc = method_getTypeEncoding(methods[j]);
-                int w = snprintf(g_copyClasses + off, sizeof(g_copyClasses) - off,
-                    "%s|%s; ", class_getName(cls), enc ? enc : "?");
-                if (w > 0) off += w;
-                found++;
+        // geerbte Methoden auch finden (class_getInstanceMethod traversiert die Hierarchie)
+        Method m = class_getInstanceMethod(cls, sel);
+        if (m) {
+            const char *enc = method_getTypeEncoding(m);
+            Class implCls = class_getSuperclass(cls);
+            // Finde die Klasse, die es tatsächlich implementiert
+            while (implCls && !class_getInstanceMethod(implCls, sel)) {
+                implCls = class_getSuperclass(implCls);
             }
+            int w = snprintf(g_copyClasses + off, sizeof(g_copyClasses) - off,
+                "%s(impl=%s)|%s; ", class_getName(cls),
+                implCls ? class_getName(implCls) : "?",
+                enc ? enc : "?");
+            if (w > 0) off += w;
+            found++;
         }
-        free(methods);
     }
     free(classes);
-    L("copyNextSampleBuffer: %d Klassen gefunden", found);
+    if (!found) {
+        snprintf(g_copyClasses, sizeof(g_copyClasses), "copyNext: KEINE Klasse gefunden (auch nicht geerbt)");
+    }
+    L("copyNextSampleBuffer: %d Klassen (inkl. geerbt)", found);
 }
 
 // ---------------------------------------------------------------- ctor
