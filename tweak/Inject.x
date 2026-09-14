@@ -657,6 +657,12 @@ static void wsClientThread(void) {
                             atomic_store(&g_modeWrapOrig, 0);
                             atomic_store(&g_modeTestPattern, 0);
                             L("Modus: NORMAL");
+                        } else if ([cmd isEqualToString:@"mode:redump"]) {
+                            // Diagnose erneut ausführen (nach Kamera-Start, Klassen jetzt geladen)
+                            dumpWildcardClasses();
+                            logMethodsOfClass(NSClassFromString(@"BWNodeOutput"), "BWNodeOutput", g_methodDump);
+                            dumpCopyNextClasses();
+                            L("Modus: REDUMP");
                         }
                     }
                     free(payload);
