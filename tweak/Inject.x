@@ -228,12 +228,22 @@ static CVPixelBufferRef makeTestPattern(void) {
         (__bridge id)kCVPixelBufferWidthKey: @(1440),
         (__bridge id)kCVPixelBufferHeightKey: @(1080),
         (__bridge id)kCVPixelBufferIOSurfacePropertiesKey: @{},
+        (__bridge id)kCVPixelBufferMetalCompatibilityKey: @YES,
+        (__bridge id)kCVPixelBufferBytesPerRowAlignmentKey: @64,
     };
     CVPixelBufferRef pb = NULL;
-    CVPixelBufferCreate(kCFAllocatorDefault, 1440, 1080,
+    CVReturn cr = CVPixelBufferCreate(kCFAllocatorDefault, 1440, 1080,
         kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
         (__bridge CFDictionaryRef)attrs, &pb);
     if (!pb) return NULL;
+
+    // Diagnose: ist der Buffer IOSurface-backed?
+    IOSurfaceRef surf = CVPixelBufferGetIOSurface(pb);
+    L("Testmuster: IOSurface=%s (id=%u)", surf ? "JA" : "NEIN",
+      surf ? IOSurfaceGetID(surf) : 0);
+    size_t s0 = CVPixelBufferGetBytesPerRowOfPlane(pb, 0);
+    size_t s1 = CVPixelBufferGetBytesPerRowOfPlane(pb, 1);
+    L("Testmuster: stride=%zu/%zu", s0, s1);
 
     CVPixelBufferLockBaseAddress(pb, 0);
     uint8_t *y = CVPixelBufferGetBaseAddressOfPlane(pb, 0);
@@ -244,7 +254,6 @@ static CVPixelBufferRef makeTestPattern(void) {
     size_t h = CVPixelBufferGetHeight(pb);
 
     for (size_t r = 0; r < h; r++) memset(y + r * yS, 100, w);
-    // Cb=128, Cr=128 interleaved
     for (size_t r = 0; r < h / 2; r++) {
         uint8_t *row = uv + r * uvS;
         for (size_t x = 0; x < w; x += 2) {
@@ -306,10 +315,79 @@ static CMSampleBufferRef buildSwapSampleBuffer(CMSampleBufferRef original) {
     return sb;
 }
 
-// ---------------------------------------------------------------- Frame-Hooks
-// LordVCAM-Referenz hookt BEIDE Klassen. Der aktive iOS-16-Kamerapfad ist
-// BWNodeOutput (FigCaptureClientSessionMonitor.emitSampleBuffer: wird von der
-// Kamera-App nicht aufgerufen — emit=0 in der Telemetrie).
+// ---------------------------------------------------------------- Handoff-Diagnose
+static _Atomic int64_t g_handoffDumped = 0;
+// Diagnose-Werte als Globals (über Status-Port abrufbar)
+static _Atomic int64_t d_origValid = 0, d_origReady = 0, d_origSamples = 0;
+static _Atomic int64_t d_origHasImg = 0, d_origHasData = 0, d_origHasFmt = 0;
+static _Atomic int64_t d_origSurfId = 0, d_origSurfSeed = 0;
+static _Atomic int64_t d_origFullRange = 0;
+static _Atomic int64_t d_replValid = 0, d_replReady = 0, d_replSamples = 0;
+static _Atomic int64_t d_replHasImg = 0, d_replHasData = 0, d_replHasFmt = 0;
+static _Atomic int64_t d_replSurfId = 0, d_replSurfSeed = 0;
+static _Atomic int64_t d_replFullRange = 0;
+static char d_hookClass[128] = {0};
+static char d_hookEncoding[128] = {0};
+
+static void dumpHandoff(id sampleBuffer, CMSampleBufferRef replacement) {
+    if (atomic_load(&g_handoffDumped)) return;
+
+    CMSampleBufferRef orig = (__bridge CMSampleBufferRef)sampleBuffer;
+    if (!orig) return;
+
+    CVPixelBufferRef oImg = CMSampleBufferGetImageBuffer(orig);
+    CMBlockBufferRef oData = CMSampleBufferGetDataBuffer(orig);
+    CMFormatDescriptionRef oFmt = CMSampleBufferGetFormatDescription(orig);
+    IOSurfaceRef oSurf = oImg ? CVPixelBufferGetIOSurface(oImg) : NULL;
+
+    atomic_store(&d_origValid, CMSampleBufferIsValid(orig));
+    atomic_store(&d_origReady, CMSampleBufferDataIsReady(orig));
+    atomic_store(&d_origSamples, (int64_t)CMSampleBufferGetNumSamples(orig));
+    atomic_store(&d_origHasImg, oImg != NULL);
+    atomic_store(&d_origHasData, oData != NULL);
+    atomic_store(&d_origHasFmt, oFmt != NULL);
+    atomic_store(&d_origSurfId, oSurf ? (int64_t)IOSurfaceGetID(oSurf) : 0);
+    atomic_store(&d_origSurfSeed, oSurf ? (int64_t)IOSurfaceGetSeed(oSurf) : 0);
+    if (oFmt) {
+        CFDictionaryRef ext = CMFormatDescriptionGetExtensions(oFmt);
+        atomic_store(&d_origFullRange,
+            ext && CFDictionaryGetValue(ext, kCMFormatDescriptionExtension_FullRangeVideo) ? 1 : 0);
+    }
+
+    CVPixelBufferRef rImg = replacement ? CMSampleBufferGetImageBuffer(replacement) : NULL;
+    CMBlockBufferRef rData = replacement ? CMSampleBufferGetDataBuffer(replacement) : NULL;
+    CMFormatDescriptionRef rFmt = replacement ? CMSampleBufferGetFormatDescription(replacement) : NULL;
+    IOSurfaceRef rSurf = rImg ? CVPixelBufferGetIOSurface(rImg) : NULL;
+
+    atomic_store(&d_replValid, replacement ? CMSampleBufferIsValid(replacement) : 0);
+    atomic_store(&d_replReady, replacement ? CMSampleBufferDataIsReady(replacement) : 0);
+    atomic_store(&d_replSamples, replacement ? (int64_t)CMSampleBufferGetNumSamples(replacement) : -1);
+    atomic_store(&d_replHasImg, rImg != NULL);
+    atomic_store(&d_replHasData, rData != NULL);
+    atomic_store(&d_replHasFmt, rFmt != NULL);
+    atomic_store(&d_replSurfId, rSurf ? (int64_t)IOSurfaceGetID(rSurf) : 0);
+    atomic_store(&d_replSurfSeed, rSurf ? (int64_t)IOSurfaceGetSeed(rSurf) : 0);
+    if (rFmt) {
+        CFDictionaryRef ext = CMFormatDescriptionGetExtensions(rFmt);
+        atomic_store(&d_replFullRange,
+            ext && CFDictionaryGetValue(ext, kCMFormatDescriptionExtension_FullRangeVideo) ? 1 : 0);
+    }
+
+    atomic_store(&g_handoffDumped, 1);
+}
+
+static _Atomic int64_t g_hookClassChecked = 0;
+static void dumpHookClass(id self) {
+    if (atomic_load(&g_hookClassChecked)) return;
+    snprintf(d_hookClass, sizeof(d_hookClass), "%s", object_getClassName(self));
+    Class cls = object_getClass(self);
+    Method m = class_getInstanceMethod(cls, @selector(emitSampleBuffer:));
+    if (m) {
+        const char *enc = method_getTypeEncoding(m);
+        if (enc) snprintf(d_hookEncoding, sizeof(d_hookEncoding), "%s", enc);
+    }
+    atomic_store(&g_hookClassChecked, 1);
+}
 %hook FigCaptureClientSessionMonitor
 - (void)emitSampleBuffer:(id)sampleBuffer {
     atomic_fetch_add(&g_emitCalls, 1);
@@ -364,6 +442,11 @@ static _Atomic int64_t g_origHeight = 0;
     }
 
     CMSampleBufferRef fake = buildSwapSampleBuffer((__bridge CMSampleBufferRef)sampleBuffer);
+
+    // Einmalig: Handoff-Diagnose (Original vs. Ersatz) + konkrete Klasse
+    if (!atomic_load(&g_handoffDumped)) dumpHandoff(sampleBuffer, fake);
+    if (!atomic_load(&g_hookClassChecked)) dumpHookClass(self);
+
     if (fake) {
         %orig((__bridge id)fake);
         CFRelease(fake);
@@ -432,6 +515,26 @@ static void statusServerThread(void) {
         }
         if (g_methodDump2[0]) {
             int mw = snprintf(msg + w, sizeof(msg) - w, "FigCap: %s\n", g_methodDump2);
+            if (mw > 0) w += mw;
+        }
+        if (atomic_load(&g_handoffDumped)) {
+            int mw = snprintf(msg + w, sizeof(msg) - w,
+                "HANDOFF orig(v=%lld r=%lld s=%lld img=%lld data=%lld fmt=%lld surf=%lld/%lld fr=%lld) "
+                "repl(v=%lld r=%lld s=%lld img=%lld data=%lld fmt=%lld surf=%lld/%lld fr=%lld)\n"
+                "HOOKCLASS=%s ENC=%s\n",
+                (long long)atomic_load(&d_origValid), (long long)atomic_load(&d_origReady),
+                (long long)atomic_load(&d_origSamples),
+                (long long)atomic_load(&d_origHasImg), (long long)atomic_load(&d_origHasData),
+                (long long)atomic_load(&d_origHasFmt),
+                (long long)atomic_load(&d_origSurfId), (long long)atomic_load(&d_origSurfSeed),
+                (long long)atomic_load(&d_origFullRange),
+                (long long)atomic_load(&d_replValid), (long long)atomic_load(&d_replReady),
+                (long long)atomic_load(&d_replSamples),
+                (long long)atomic_load(&d_replHasImg), (long long)atomic_load(&d_replHasData),
+                (long long)atomic_load(&d_replHasFmt),
+                (long long)atomic_load(&d_replSurfId), (long long)atomic_load(&d_replSurfSeed),
+                (long long)atomic_load(&d_replFullRange),
+                d_hookClass, d_hookEncoding);
             if (mw > 0) w += mw;
         }
         send(c, msg, w, 0);
