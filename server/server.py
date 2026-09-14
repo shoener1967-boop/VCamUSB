@@ -388,6 +388,20 @@ class FramePusher:
     async def run(self):
         from websockets.asyncio.client import connect
         import struct as _struct
+        # Diagnose counters for the USB/WebSocket leg.
+        self.state.setdefault("ws_messages", 0)
+        self.state.setdefault("ws_bytes", 0)
+        self.state.setdefault("au_sent", 0)
+        self.state.setdefault("nal_sent", 0)
+
+        async def send_binary(ws, payload):
+            if not payload:
+                return
+            await ws.send(payload)
+            self.state["ws_messages"] += 1
+            self.state["ws_bytes"] += len(payload)
+            self.state["bytes_sent"] += len(payload)
+
         while not self._closed:
             try:
                 async with connect(f"ws://{self.ip}:{self.port}",
@@ -439,7 +453,7 @@ class FramePusher:
                     def nal_type(nal):
                         return nal[0] & 0x1f if nal else 0
 
-                    def flush_au(ws):
+                    async def flush_au(ws):
                         nonlocal cur_au, sent_sps_pps
                         if not cur_au:
                             return
@@ -449,9 +463,10 @@ class FramePusher:
                             avcc += _struct.pack(">I", len(nal)) + nal
                         cur_au = []
                         if avcc:
-                            self.state["bytes_sent"] += len(avcc)
+                            await send_binary(ws, avcc)
+                            self.state["au_sent"] += 1
                             self.state["frames_sent"] += 1
-                            return ws.send(avcc)
+                            return
 
                     with open(self.pipe, "rb") as f:
                         while not self._closed:
@@ -490,8 +505,8 @@ class FramePusher:
                                 t = nal_type(nal)
                                 if t == 7 or t == 8:
                                     # SPS/PPS: eigene Message (roh)
-                                    await ws.send(nal)
-                                    self.state["bytes_sent"] += len(nal)
+                                    await send_binary(ws, nal)
+                                    self.state["nal_sent"] += 1
                                 elif t == 9:
                                     # AUD: aktuelle AU abschließen
                                     await flush_au(ws)
@@ -550,6 +565,10 @@ class Dashboard:
                 "encode": f"{WIDTH}x{HEIGHT} @{st.get('fps', DEFAULT_FPS)}fps",
                 "fps": fps,
                 "mb_sent": round(st["bytes_sent"] / 1e6, 1),
+                "ws_messages": st.get("ws_messages", 0),
+                "ws_bytes": st.get("ws_bytes", 0),
+                "au_sent": st.get("au_sent", 0),
+                "nal_sent": st.get("nal_sent", 0),
                 "uptime": int(time.time() - st["start_time"]) if st["start_time"] else 0,
                 "src_error": st.get("src_error"),
             }

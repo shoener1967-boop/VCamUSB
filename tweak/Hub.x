@@ -85,6 +85,17 @@ static void hubRemoveClient(int fd) {
     L("client- total=%d", g_clientCount);
 }
 
+static BOOL hubSendAll(int fd, const void *data, size_t len) {
+    const uint8_t *p = (const uint8_t *)data;
+    while (len > 0) {
+        ssize_t n = send(fd, p, len > (size_t)INT_MAX ? INT_MAX : (int)len, 0);
+        if (n <= 0) return NO;
+        p += n;
+        len -= (size_t)n;
+    }
+    return YES;
+}
+
 static void hubBroadcastExcept(int fromFd, const uint8_t *data, size_t len) {
     pthread_mutex_lock(&g_cliMutex);
     for (int i = 0; i < 16; i++) {
@@ -105,8 +116,7 @@ static void hubBroadcastExcept(int fromFd, const uint8_t *data, size_t len) {
                 for (int b = 0; b < 8; b++) hdr[2 + b] = (uint8_t)(len >> (56 - b * 8));
                 hl = 10;
             }
-            if (send(fd, hdr, (int)hl, 0) != (ssize_t)hl) continue;
-            if (send(fd, data, (int)len, 0) != (ssize_t)len) continue;
+            if (!hubSendAll(fd, hdr, hl) || !hubSendAll(fd, data, len)) continue;
         }
     }
     pthread_mutex_unlock(&g_cliMutex);

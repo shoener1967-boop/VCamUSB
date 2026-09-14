@@ -33,6 +33,10 @@ static os_log_t LOG = NULL;
     os_log(LOG, "%s: " FMT, __func__, ##__VA_ARGS__); } while (0)
 
 // ---------------------------------------------------------------- Telemetrie (atomar)
+static _Atomic uint64_t g_wsBinaryCount = 0;
+static _Atomic uint64_t g_wsTextCount = 0;
+static _Atomic uint64_t g_wsBytesReceived = 0;
+static _Atomic uint64_t g_wsFramesDropped = 0;
 static _Atomic uint64_t g_rxNalCount = 0;
 static _Atomic uint64_t g_spsCount = 0;
 static _Atomic uint64_t g_ppsCount = 0;
@@ -495,6 +499,7 @@ static void statusServerThread(void) {
         char msg[5120];
         int w = snprintf(msg, sizeof(msg),
             "rxNal=%llu sps=%llu pps=%llu idr=%llu "
+            "wsBin=%llu wsText=%llu wsBytes=%llu "
             "formatDesc=%llu submit=%llu output=%llu errors=%llu "
             "emit=%llu send=%llu build=%llu swap=%llu orig=%llu hasFrame=%llu "
             "vtAttempts=%llu vtError=%lld\n",
@@ -502,6 +507,9 @@ static void statusServerThread(void) {
             (unsigned long long)atomic_load(&g_spsCount),
             (unsigned long long)atomic_load(&g_ppsCount),
             (unsigned long long)atomic_load(&g_idrCount),
+            (unsigned long long)atomic_load(&g_wsBinaryCount),
+            (unsigned long long)atomic_load(&g_wsTextCount),
+            (unsigned long long)atomic_load(&g_wsBytesReceived),
             (unsigned long long)atomic_load(&g_formatDescCount),
             (unsigned long long)atomic_load(&g_decodeSubmitCount),
             (unsigned long long)atomic_load(&g_decodeOutputCount),
@@ -591,7 +599,9 @@ static void wsClientThread(void) {
             if (send(fd, req, (int)strlen(req), 0) < 0) { close(fd); sleep(2); continue; }
             char resp[2048];
             ssize_t n = recv(fd, resp, sizeof(resp) - 1, 0);
-            if (n <= 0 || strstr(resp, "101") == NULL) { close(fd); sleep(2); continue; }
+            if (n <= 0) { close(fd); sleep(2); continue; }
+            resp[n] = 0;
+            if (strstr(resp, "101") == NULL) { close(fd); sleep(2); continue; }
             L("mit Hub verbunden");
             while (1) {
                 uint8_t hdr[2];
@@ -623,9 +633,11 @@ static void wsClientThread(void) {
                 if (got < plen) { free(payload); break; }
                 if (masked) for (uint64_t i = 0; i < plen; i++) payload[i] ^= mask[i & 3];
                 if (opcode == 0x2) {
+                    atomic_fetch_add(&g_wsBinaryCount, 1);
+                    atomic_fetch_add(&g_wsBytesReceived, plen);
                     enqueueNal([NSData dataWithBytesNoCopy:payload length:(NSUInteger)plen freeWhenDone:YES]);
                 } else if (opcode == 0x1) {
-                    // Text-Nachricht = Modus-Steuerung
+                    atomic_fetch_add(&g_wsTextCount, 1);
                     NSString *cmd = [[NSString alloc] initWithBytes:payload length:(NSUInteger)plen encoding:NSUTF8StringEncoding];
                     if (cmd) {
                         if ([cmd isEqualToString:@"mode:wrap_orig"]) {
