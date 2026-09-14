@@ -579,6 +579,11 @@ static void statusServerThread(void) {
 }
 
 // ---------------------------------------------------------------- WS-Client
+// Forward-Declarations (Diagnose-Funktionen liegen weiter unten)
+static void dumpWildcardClasses(void);
+static void dumpCopyNextClasses(void);
+static void logMethodsOfClass(Class cls, const char *className, char *dump);
+
 static void wsClientThread(void) {
     while (1) {
         @autoreleasepool {
