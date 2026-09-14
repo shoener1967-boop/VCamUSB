@@ -803,11 +803,8 @@ static void logMethodsOfClass(Class cls, const char *className, char *dump) {
     for (unsigned int i = 0; i < count && off < 4096 - 200; i++) {
         SEL sel = method_getName(methods[i]);
         const char *name = sel_getName(sel);
-        if (strstr(name, "ample") || strstr(name, "emit") || strstr(name, "utput")
-            || strstr(name, "eliver") || strstr(name, "endSample")) {
-            int w = snprintf(dump + off, 4096 - off, "%s; ", name);
-            if (w > 0) off += w;
-        }
+        int w = snprintf(dump + off, 4096 - off, "%s; ", name);
+        if (w > 0) off += w;
     }
     if (methods) free(methods);
     L("Methoden von %s erfasst", className);
