@@ -341,6 +341,7 @@ static CVPixelBufferRef copyShiftToFullRange(CVPixelBufferRef src) {
 }
 
 static CMSampleBufferRef buildSwapSampleBuffer(CMSampleBufferRef original) {
+    atomic_fetch_add(&g_buildCalls, 1);
     atomic_fetch_add(&g_passthroughAttempts, 1);
 
     BOOL testMode = atomic_load(&g_modeTestPattern) != 0;
@@ -357,15 +358,10 @@ static CMSampleBufferRef buildSwapSampleBuffer(CMSampleBufferRef original) {
         if (g_testPattern) px = CVPixelBufferRetain(g_testPattern);
         atomic_fetch_add(&g_testPatternUsed, 1);
     } else {
-        // Decoder-Buffer sicher holen (Retain unter Lock), dann KOPIEREN + shiften
+        // Decoder-Buffer direkt durchreichen (Passthrough, KEIN Range-Shift!)
         [g_frameLock lock];
         if (g_latestFrame) px = CVPixelBufferRetain(g_latestFrame);
         [g_frameLock unlock];
-        if (px) {
-            CVPixelBufferRef shifted = copyShiftToFullRange(px);
-            CVPixelBufferRelease(px);
-            px = shifted;
-        }
     }
     if (!px) {
         atomic_fetch_add(&g_passthroughOrig, 1);
@@ -476,26 +472,12 @@ static void dumpHookClass(id self) {
 %hook FigCaptureClientSessionMonitor
 - (void)emitSampleBuffer:(id)sampleBuffer {
     atomic_fetch_add(&g_emitCalls, 1);
-    CMSampleBufferRef fake = buildSwapSampleBuffer((__bridge CMSampleBufferRef)sampleBuffer);
-    if (fake) {
-        %orig((__bridge id)fake);
-        CFRelease(fake);
-        return;
-    }
-    atomic_fetch_add(&g_origCount, 1);
-    %orig;
+    %orig;   // NUR zählen — kein Replacement (Double-Replacement vermeiden!)
 }
 
 - (void)sendMediaServerdSampleAtPoint:(id)sampleBuffer {
     atomic_fetch_add(&g_sendCalls, 1);
-    CMSampleBufferRef fake = buildSwapSampleBuffer((__bridge CMSampleBufferRef)sampleBuffer);
-    if (fake) {
-        %orig((__bridge id)fake);
-        CFRelease(fake);
-        return;
-    }
-    atomic_fetch_add(&g_origCount, 1);
-    %orig;
+    %orig;   // NUR zählen
 }
 %end
 
@@ -745,6 +727,23 @@ static void logMethodsOfClass(Class cls, const char *className, char *dump) {
 }
 
 // ---------------------------------------------------------------- copyNext-Klassen finden
+static Class ClassThatImplementsSelector(Class cls, SEL sel) {
+    for (Class c = cls; c != Nil; c = class_getSuperclass(c)) {
+        unsigned int count = 0;
+        Method *methods = class_copyMethodList(c, &count);
+        BOOL found = NO;
+        for (unsigned int i = 0; i < count; i++) {
+            if (method_getName(methods[i]) == sel) {
+                found = YES;
+                break;
+            }
+        }
+        free(methods);
+        if (found) return c;
+    }
+    return Nil;
+}
+
 static void dumpCopyNextClasses(void) {
     SEL sel = sel_registerName("copyNextSampleBuffer:");
     int count = objc_getClassList(NULL, 0);
@@ -756,19 +755,13 @@ static void dumpCopyNextClasses(void) {
     int found = 0;
     for (int i = 0; i < count && off < sizeof(g_copyClasses) - 300; i++) {
         Class cls = classes[i];
-        // geerbte Methoden auch finden (class_getInstanceMethod traversiert die Hierarchie)
-        Method m = class_getInstanceMethod(cls, sel);
-        if (m) {
-            const char *enc = method_getTypeEncoding(m);
-            Class implCls = class_getSuperclass(cls);
-            // Finde die Klasse, die es tatsächlich implementiert
-            while (implCls && !class_getInstanceMethod(implCls, sel)) {
-                implCls = class_getSuperclass(implCls);
-            }
+        Method inherited = class_getInstanceMethod(cls, sel);
+        if (inherited) {
+            Class impl = ClassThatImplementsSelector(cls, sel);
             int w = snprintf(g_copyClasses + off, sizeof(g_copyClasses) - off,
                 "%s(impl=%s)|%s; ", class_getName(cls),
-                implCls ? class_getName(implCls) : "?",
-                enc ? enc : "?");
+                impl ? class_getName(impl) : "?",
+                method_getTypeEncoding(inherited));
             if (w > 0) off += w;
             found++;
         }
