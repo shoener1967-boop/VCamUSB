@@ -61,8 +61,13 @@ static char g_sinkClasses[8192] = {0};
 
 // Modus-Steuerung über WS-Textnachrichten (Marker-Dateien funktionieren nicht,
 // weil mediaserverd eine andere /tmp-Sicht hat als die SSH-Shell!)
+static _Atomic int g_modeBW = 1;
 static _Atomic int g_modeWrapOrig = 0;
 static _Atomic int g_modeTestPattern = 0;
+static _Atomic int g_modeFigEmit = 0;
+static _Atomic int g_modeFigSend = 0;
+static _Atomic uint64_t g_figEmitReplacements = 0;
+static _Atomic uint64_t g_figSendReplacements = 0;
 
 // ---------------------------------------------------------------- Globals
 static NSMutableArray<NSData *> *g_nalQueue = nil;
@@ -430,12 +435,30 @@ static void dumpHookClass(id self) {
 %hook FigCaptureClientSessionMonitor
 - (void)emitSampleBuffer:(id)sampleBuffer {
     atomic_fetch_add(&g_emitCalls, 1);
-    %orig;   // NUR zählen — kein Replacement (Double-Replacement vermeiden!)
+    if (atomic_load(&g_modeFigEmit)) {
+        CMSampleBufferRef fake = buildSwapSampleBuffer((__bridge CMSampleBufferRef)sampleBuffer);
+        if (fake) {
+            atomic_fetch_add(&g_figEmitReplacements, 1);
+            %orig((__bridge id)fake);
+            CFRelease(fake);
+            return;
+        }
+    }
+    %orig;
 }
 
 - (void)sendMediaServerdSampleAtPoint:(id)sampleBuffer {
     atomic_fetch_add(&g_sendCalls, 1);
-    %orig;   // NUR zählen
+    if (atomic_load(&g_modeFigSend)) {
+        CMSampleBufferRef fake = buildSwapSampleBuffer((__bridge CMSampleBufferRef)sampleBuffer);
+        if (fake) {
+            atomic_fetch_add(&g_figSendReplacements, 1);
+            %orig((__bridge id)fake);
+            CFRelease(fake);
+            return;
+        }
+    }
+    %orig;
 }
 %end
 
@@ -479,6 +502,10 @@ static void trackObject(id self) {
 - (void)emitSampleBuffer:(id)sampleBuffer {
     atomic_fetch_add(&g_emitCalls, 1);
     trackObject(self);
+    if (!atomic_load(&g_modeBW)) {
+        %orig;
+        return;
+    }
 
     // Einmalig: Original-Pixel-Format + Dimensionen erfassen (Diagnose)
     if (atomic_load(&g_origPixelFormat) == 0) {
@@ -536,7 +563,7 @@ static void statusServerThread(void) {
             "rxNal=%llu sps=%llu pps=%llu idr=%llu "
             "wsBin=%llu wsText=%llu wsBytes=%llu "
             "formatDesc=%llu submit=%llu output=%llu errors=%llu "
-            "emit=%llu send=%llu build=%llu swap=%llu orig=%llu hasFrame=%llu "
+            "emit=%llu send=%llu figEmitRep=%llu figSendRep=%llu build=%llu swap=%llu orig=%llu hasFrame=%llu "
             "vtAttempts=%llu vtError=%lld\n",
             (unsigned long long)atomic_load(&g_rxNalCount),
             (unsigned long long)atomic_load(&g_spsCount),
@@ -551,6 +578,8 @@ static void statusServerThread(void) {
             (unsigned long long)atomic_load(&g_decodeErrorCount),
             (unsigned long long)atomic_load(&g_emitCalls),
             (unsigned long long)atomic_load(&g_sendCalls),
+            (unsigned long long)atomic_load(&g_figEmitReplacements),
+            (unsigned long long)atomic_load(&g_figSendReplacements),
             (unsigned long long)atomic_load(&g_buildCalls),
             (unsigned long long)atomic_load(&g_swapCount),
             (unsigned long long)atomic_load(&g_origCount),
@@ -711,10 +740,35 @@ static void wsClientThread(void) {
                             atomic_store(&g_modeTestPattern, 1);
                             atomic_store(&g_modeWrapOrig, 0);
                             L("Modus: TESTPATTERN");
+                        } else if ([cmd isEqualToString:@"mode:bw_off"]) {
+                            atomic_store(&g_modeBW, 0);
+                            L("Modus: BW_OFF");
+                        } else if ([cmd isEqualToString:@"mode:bw_on"]) {
+                            atomic_store(&g_modeBW, 1);
+                            atomic_store(&g_modeFigEmit, 0);
+                            atomic_store(&g_modeFigSend, 0);
+                            L("Modus: BW_ON");
+                        } else if ([cmd isEqualToString:@"mode:fig_emit"]) {
+                            atomic_store(&g_modeBW, 0);
+                            atomic_store(&g_modeFigEmit, 1);
+                            atomic_store(&g_modeFigSend, 0);
+                            L(@"Modus: FIG_EMIT");
+                        } else if ([cmd isEqualToString:@"mode:fig_send"]) {
+                            atomic_store(&g_modeBW, 0);
+                            atomic_store(&g_modeFigSend, 1);
+                            L(@"Modus: FIG_SEND");
                         } else if ([cmd isEqualToString:@"mode:normal"]) {
+                            atomic_store(&g_modeBW, 1);
+                            atomic_store(&g_modeFigEmit, 0);
+                            atomic_store(&g_modeFigSend, 0);
                             atomic_store(&g_modeWrapOrig, 0);
                             atomic_store(&g_modeTestPattern, 0);
-                            L("Modus: NORMAL");
+                            L(@"Modus: NORMAL");
+                        } else if ([cmd isEqualToString:@"mode:observe"]) {
+                            atomic_store(&g_modeBW, 0);
+                            atomic_store(&g_modeFigEmit, 0);
+                            atomic_store(&g_modeFigSend, 0);
+                            L(@"Modus: OBSERVE");
                         } else if ([cmd isEqualToString:@"mode:redump"]) {
                             // Diagnose erneut ausführen (nach Kamera-Start, Klassen jetzt geladen)
                             dumpWildcardClasses();
