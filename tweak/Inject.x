@@ -56,6 +56,7 @@ static _Atomic int64_t g_vtSessionError = 0;
 static char g_methodDump[4096] = {0};
 static char g_methodDump2[4096] = {0};
 static char g_copyClasses[4096] = {0};
+static char g_sinkClasses[8192] = {0};
 
 // Modus-Steuerung über WS-Textnachrichten (Marker-Dateien funktionieren nicht,
 // weil mediaserverd eine andere /tmp-Sicht hat als die SSH-Shell!)
@@ -548,6 +549,10 @@ static void statusServerThread(void) {
             int mw = snprintf(msg + w, sizeof(msg) - w, "COPYNEXT: %s\n", g_copyClasses);
             if (mw > 0) w += mw;
         }
+        if (g_sinkClasses[0]) {
+            int mw = snprintf(msg + w, sizeof(msg) - w, "SINKS: %s\n", g_sinkClasses);
+            if (mw > 0) w += mw;
+        }
         if (atomic_load(&g_handoffDumped)) {
             int mw = snprintf(msg + w, sizeof(msg) - w,
                 "HANDOFF orig(v=%lld r=%lld s=%lld img=%lld data=%lld fmt=%lld surf=%lld/%lld fr=%lld) "
@@ -737,6 +742,55 @@ static void dumpCopyNextClasses(void) {
     L("copyNextSampleBuffer: %d Klassen (inkl. geerbt)", found);
 }
 
+// ---------------------------------------------------------------- Foto/Video-Klassen finden
+static void dumpWildcardClasses(void) {
+    // Alle Klassen mit relevantem Namensmuster finden und deren SampleBuffer-Methoden listen
+    int count = objc_getClassList(NULL, 0);
+    Class *classes = (Class *)malloc(sizeof(Class) * count);
+    count = objc_getClassList(classes, count);
+    size_t off = 0;
+    g_sinkClasses[0] = 0;
+    off += snprintf(g_sinkClasses + off, sizeof(g_sinkClasses) - off, "Sinks: ");
+
+    const char *patterns[] = {
+        "BWStillImage", "StillImage", "BWPhoto", "Photo", "Movie", "Recording",
+        "BWVideo", "Capture", "Sink", "Scaler"
+    };
+    int npat = sizeof(patterns) / sizeof(patterns[0]);
+
+    for (int i = 0; i < count && off < sizeof(g_sinkClasses) - 400; i++) {
+        Class cls = classes[i];
+        const char *name = class_getName(cls);
+        BOOL match = NO;
+        for (int p = 0; p < npat; p++) {
+            if (strstr(name, patterns[p])) { match = YES; break; }
+        }
+        if (!match) continue;
+
+        // Methoden dieser Klasse mit SampleBuffer/PixelBuffer/emit/output im Namen
+        unsigned int mc = 0;
+        Method *methods = class_copyMethodList(cls, &mc);
+        int mfound = 0;
+        for (unsigned int j = 0; j < mc; j++) {
+            const char *mn = sel_getName(method_getName(methods[j]));
+            if (strstr(mn, "ample") || strstr(mn, "ixel") || strstr(mn, "emit")
+                || strstr(mn, "utput") || strstr(mn, "eliver") || strstr(mn, "encode")
+                || strstr(mn, "hotos") || strstr(mn, "humbnail")) {
+                int w = snprintf(g_sinkClasses + off, sizeof(g_sinkClasses) - off,
+                    "%s::%s; ", name, mn);
+                if (w > 0) off += w;
+                mfound++;
+            }
+        }
+        free(methods);
+    }
+    free(classes);
+    if (off == (size_t)snprintf(g_sinkClasses, 8, "Sinks: ")) {
+        snprintf(g_sinkClasses, sizeof(g_sinkClasses), "Sinks: keine Foto/Video-Klassen gefunden");
+    }
+    L("Sink-Klassen-Diagnose fertig");
+}
+
 // ---------------------------------------------------------------- ctor
 %ctor {
     NSString *proc = [[NSProcessInfo processInfo] processName];
@@ -748,6 +802,7 @@ static void dumpCopyNextClasses(void) {
                    dispatch_get_main_queue(), ^{
         logMethodsOfClass(NSClassFromString(@"BWNodeOutput"), "BWNodeOutput", g_methodDump);
         logMethodsOfClass(NSClassFromString(@"FigCaptureClientSessionMonitor"), "FigCaptureClientSessionMonitor", g_methodDump2);
+        dumpWildcardClasses();
         dumpCopyNextClasses();
     });
 
