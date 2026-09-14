@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "ws-debug-2026-09-14-02"
+#define VCAM_BUILD_ID "stage-iso-2026-09-15-01"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -79,6 +79,14 @@ static _Atomic int g_modeFigEmit = 0;
 static _Atomic int g_modeFigSend = 0;
 static _Atomic uint64_t g_figEmitReplacements = 0;
 static _Atomic uint64_t g_figSendReplacements = 0;
+
+// ---------------------------------------------------------------- Stufen-Isolation (Astra)
+// stage 0: passiv — nur Status-Server, Hook läuft NICHT aktiv, kein WS/Decoder
+// stage 1: BWNodeOutput-Hook passiv (Pro-Objekt-Telemetrie, KEIN Pixel-Swap)
+// stage 2: zusätzlich WS-Client + Decoder aktiv (weiterhin KEIN Swap)
+// stage 3: voller in-place Pixel-Swap
+// Steuerung über TCP-Status-Port 8769: "stage=N" (unabhängig von WS/Hub!)
+static _Atomic int g_stage = 0;
 
 // ---------------------------------------------------------------- Globals
 static NSMutableArray<NSData *> *g_nalQueue = nil;
@@ -433,6 +441,11 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
                 cropX = 0;
                 cropY = (sh - cropH) / 2;
             }
+            // NV12-Chroma: Crop-Koordinaten auf gerade Werte runden (Astra)
+            cropX &= ~(size_t)1;
+            cropY &= ~(size_t)1;
+            cropW &= ~(size_t)1;
+            cropH &= ~(size_t)1;
             // Y-Plane (volle Auflösung)
             scaleNV12Plane(CVPixelBufferGetBaseAddressOfPlane(src, 0),
                            CVPixelBufferGetBytesPerRowOfPlane(src, 0), sw, sh,
@@ -660,9 +673,16 @@ static _Atomic int64_t g_origWidth = 0;
 static _Atomic int64_t g_origHeight = 0;
 
 // Objekt-Instanz-Tracking: struct-Array statt String (kein memmove-Bug)
+// NEU (Astra): pro Objekt Format, Größe, IOSurface-ID, letzte PTS.
 typedef struct {
     uintptr_t object;
     uint64_t calls;
+    uint64_t swaps;
+    int64_t lastPTS;
+    int64_t width;
+    int64_t height;
+    int64_t pixelFormat;
+    int64_t iosurfaceID;
     char className[96];
 } OutputEntry;
 
@@ -691,10 +711,49 @@ static void trackObject(id self) {
     pthread_mutex_unlock(&g_objMutex);
 }
 
+// Pro-Objekt-Format/-Buffer-Daten aktualisieren (Astra: welcher Output ist sichtbar?)
+static void trackObjectFrame(id self, CMSampleBufferRef sb, BOOL didSwap) {
+    if (!sb) return;
+    uintptr_t object = (uintptr_t)self;
+    CVPixelBufferRef px = CMSampleBufferGetImageBuffer(sb);
+    if (!px) return;
+    pthread_mutex_lock(&g_objMutex);
+    for (size_t i = 0; i < 128; i++) {
+        if (g_outputs[i].object == object) {
+            g_outputs[i].width = (int64_t)CVPixelBufferGetWidth(px);
+            g_outputs[i].height = (int64_t)CVPixelBufferGetHeight(px);
+            g_outputs[i].pixelFormat = (int64_t)CVPixelBufferGetPixelFormatType(px);
+            IOSurfaceRef surf = CVPixelBufferGetIOSurface(px);
+            g_outputs[i].iosurfaceID = surf ? (int64_t)IOSurfaceGetID(surf) : -1;
+            CMTime pts = CMSampleBufferGetPresentationTimeStamp(sb);
+            g_outputs[i].lastPTS = (int64_t)pts.value;
+            if (didSwap) g_outputs[i].swaps++;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_objMutex);
+}
+
 %hook BWNodeOutput
 - (void)emitSampleBuffer:(id)sampleBuffer {
     atomic_fetch_add(&g_emitCalls, 1);
     trackObject(self);
+    CMSampleBufferRef orig = (__bridge CMSampleBufferRef)sampleBuffer;
+    trackObjectFrame(self, orig, NO);
+
+    int stage = atomic_load(&g_stage);
+    // stage 0: nur Zählen, kein weiterer Eingriff
+    if (stage == 0) {
+        atomic_fetch_add(&g_origCount, 1);
+        %orig;
+        return;
+    }
+    // stage 1+2: Telemetrie aktiv, aber KEIN Pixel-Swap
+    if (stage < 3) {
+        atomic_fetch_add(&g_origCount, 1);
+        %orig;
+        return;
+    }
     if (!atomic_load(&g_modeBW)) {
         %orig;
         return;
@@ -720,9 +779,9 @@ static void trackObject(id self) {
 
     // Einmalig: Original-Pixel-Format + Dimensionen erfassen (Diagnose)
     if (atomic_load(&g_origPixelFormat) == 0) {
-        CMSampleBufferRef orig = (__bridge CMSampleBufferRef)sampleBuffer;
-        if (orig) {
-            CVPixelBufferRef px = CMSampleBufferGetImageBuffer(orig);
+        CMSampleBufferRef origSB = (__bridge CMSampleBufferRef)sampleBuffer;
+        if (origSB) {
+            CVPixelBufferRef px = CMSampleBufferGetImageBuffer(origSB);
             if (px) {
                 OSType fmt = CVPixelBufferGetPixelFormatType(px);
                 size_t w = CVPixelBufferGetWidth(px);
@@ -739,7 +798,9 @@ static void trackObject(id self) {
 
     // In-place Pixel-Swap: Fake-Pixel in den ORIGINALEN Buffer kopieren,
     // original SampleBuffer (Timing/Attachments) bleibt unangetastet.
-    if (swapPixelsInPlace((__bridge CMSampleBufferRef)sampleBuffer)) {
+    BOOL swapped = swapPixelsInPlace((__bridge CMSampleBufferRef)sampleBuffer);
+    if (swapped) {
+        trackObjectFrame(self, orig, YES);
         %orig;
         return;
     }
@@ -797,14 +858,31 @@ static void statusServerThread(void) {
     while (1) {
         int c = accept(srv, NULL, NULL);
         if (c < 0) continue;
+        // Kommando lesen (nicht-blockierend): "stage=N" schaltet die Stufe um.
+        char cmd[64] = {0};
+        struct timeval tv = { .tv_sec = 0, .tv_usec = 150000 };
+        setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        ssize_t cr = recv(c, cmd, sizeof(cmd) - 1, 0);
+        if (cr > 0) {
+            if (strncmp(cmd, "stage=", 6) == 0) {
+                int ns = atoi(cmd + 6);
+                if (ns >= 0 && ns <= 3) {
+                    atomic_store(&g_stage, ns);
+                    L("STAGE jetzt %d", ns);
+                }
+            }
+        }
         char msg[5120];
         int w = snprintf(msg, sizeof(msg),
+            "build=%s stage=%d\n"
             "rxNal=%llu sps=%llu pps=%llu idr=%llu "
             "wsBin=%llu wsText=%llu wsBytes=%llu "
             "formatDesc=%llu submit=%llu output=%llu errors=%llu "
             "emit=%llu send=%llu figEmitRep=%llu figSendRep=%llu build=%llu swap=%llu swapMismatch=%llu inplace=%llu inplaceMis=%llu inplaceScale=%llu orig=%llu hasFrame=%llu "
             "photoState=%d recState=%d skipPhoto=%llu skipRec=%llu repl=%d "
             "vtAttempts=%llu vtError=%lld\n",
+            VCAM_BUILD_ID,
+            (int)atomic_load(&g_stage),
             (unsigned long long)atomic_load(&g_rxNalCount),
             (unsigned long long)atomic_load(&g_spsCount),
             (unsigned long long)atomic_load(&g_ppsCount),
@@ -887,10 +965,17 @@ static void statusServerThread(void) {
                 used++;
             }
             for (int i = 0; i < used && w < (int)sizeof(msg) - 300; i++) {
-                int mw = snprintf(msg + w, sizeof(msg) - w, "OUT[%d]=0x%lx:%s:%llu; ",
+                int mw = snprintf(msg + w, sizeof(msg) - w,
+                    "OUT[%d]=0x%lx:%s:emits=%llu swaps=%llu %lldx%lld fmt=0x%08llx surf=%lld pts=%lld; ",
                     i, (unsigned long)g_outputs[i].object,
                     g_outputs[i].className,
-                    (unsigned long long)g_outputs[i].calls);
+                    (unsigned long long)g_outputs[i].calls,
+                    (unsigned long long)g_outputs[i].swaps,
+                    (long long)g_outputs[i].width,
+                    (long long)g_outputs[i].height,
+                    (unsigned long long)g_outputs[i].pixelFormat,
+                    (long long)g_outputs[i].iosurfaceID,
+                    (long long)g_outputs[i].lastPTS);
                 if (mw > 0) w += mw;
             }
             pthread_mutex_unlock(&g_objMutex);
@@ -1251,16 +1336,16 @@ static void dumpWildcardClasses(void) {
     L("injiziert in %@ (pid=%d)", proc, getpid());
     if (![proc isEqualToString:@"mediaserverd"]) return;
 
-    // Diagnose periodisch alle 5s (erfasst Klassen auch NACH dem Kamera-Start)
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
-        while (1) {
-            logMethodsOfClass(NSClassFromString(@"BWNodeOutput"), "BWNodeOutput", g_methodDump);
-            logMethodsOfClass(NSClassFromString(@"FigCaptureClientSessionMonitor"), "FigCaptureClientSessionMonitor", g_methodDump2);
-            dumpWildcardClasses();
-            dumpCopyNextClasses();
-            dumpSelectorOwners();
-            sleep(5);
-        }
+    // Diagnose EINMALIG nach kurzer Verzögerung (Astra: keine 5s-Dauerlast mehr).
+    // Wiederholung nur auf explizites Kommando (redump / über Status-Port).
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
+        logMethodsOfClass(NSClassFromString(@"BWNodeOutput"), "BWNodeOutput", g_methodDump);
+        logMethodsOfClass(NSClassFromString(@"FigCaptureClientSessionMonitor"), "FigCaptureClientSessionMonitor", g_methodDump2);
+        dumpWildcardClasses();
+        dumpCopyNextClasses();
+        dumpSelectorOwners();
+        L("einmalige Diagnose fertig (stage=%d)", (int)atomic_load(&g_stage));
     });
 
     g_nalQueue = [NSMutableArray array];
@@ -1268,10 +1353,13 @@ static void dumpWildcardClasses(void) {
     g_frameLock = [NSLock new];
 
     L("VCamInject build=%s", VCAM_BUILD_ID);
-    L("vor WS-Dispatch");
+    L("START stage=0 (passiv — nur Status-Server + Zähler). Steuerung: Port 8769 'stage=N'");
 
+    // WS-Client + Decoder nur ab stage 2 (wird zur Laufzeit umgeschaltet).
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        L("WS-Block betreten");
+        // warten, bis stage >= 2 gesetzt wird
+        while (atomic_load(&g_stage) < 2) sleep(1);
+        L("WS-Block betreten (stage>=2)");
         wsClientThread();
         L("WS-Thread beendet");
     });
@@ -1279,7 +1367,7 @@ static void dumpWildcardClasses(void) {
     L("nach WS-Dispatch");
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
         while (1) {
-            pumpDecoder();
+            if (atomic_load(&g_stage) >= 2) pumpDecoder();
             maybeResetPhotoGuard();
             usleep(2500);
         }
@@ -1287,5 +1375,5 @@ static void dumpWildcardClasses(void) {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         statusServerThread();
     });
-    L("bereit — verbinde mit Hub");
+    L("bereit — stage 0 aktiv");
 }
