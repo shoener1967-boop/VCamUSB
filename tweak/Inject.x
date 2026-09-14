@@ -463,7 +463,7 @@ static _Atomic int64_t d_replFullRange = 0;
 static char d_hookClass[128] = {0};
 static char d_hookEncoding[128] = {0};
 
-static void dumpHandoff(id sampleBuffer, CMSampleBufferRef replacement) {
+__attribute__((unused)) static void dumpHandoff(id sampleBuffer, CMSampleBufferRef replacement) {
     if (atomic_load(&g_handoffDumped)) return;
 
     CMSampleBufferRef orig = (__bridge CMSampleBufferRef)sampleBuffer;
@@ -511,7 +511,7 @@ static void dumpHandoff(id sampleBuffer, CMSampleBufferRef replacement) {
 }
 
 static _Atomic int64_t g_hookClassChecked = 0;
-static void dumpHookClass(id self) {
+__attribute__((unused)) static void dumpHookClass(id self) {
     if (atomic_load(&g_hookClassChecked)) return;
     snprintf(d_hookClass, sizeof(d_hookClass), "%s", object_getClassName(self));
     Class cls = object_getClass(self);
