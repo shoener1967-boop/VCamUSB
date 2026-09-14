@@ -1,5 +1,4 @@
-// DeviceDump — Diagnose: AVCaptureDevice-Liste beim App-Start ausgeben.
-// Schreibt zusätzlich in eine Datei (deterministisch, ohne os_log-Kanal-Probleme).
+// DeviceDump — Diagnose: AVCaptureDevice-Liste beim App-Start in Datei schreiben.
 #import <AVFoundation/AVFoundation.h>
 #import <os/log.h>
 
@@ -8,20 +7,17 @@ static os_log_t LOG = NULL;
     os_log(LOG, "%s: " FMT, __func__, ##__VA_ARGS__); } while (0)
 
 static NSMutableString *g_out = nil;
-static void W(NSString *fmt, ...) {
-    va_list ap; va_start(ap, fmt);
-    NSString *s = [[NSString alloc] initWithFormat:fmt arguments:ap];
-    va_end(ap);
+static void W(NSString *s) {
     [g_out appendString:s];
     [g_out appendString:@"\n"];
-    L("%@", s);
+    NSLog(@"[devdump] %@", s);
 }
 
 %ctor {
     @autoreleasepool {
         g_out = [NSMutableString string];
         NSString *proc = [[NSProcessInfo processInfo] processName];
-        W(@"injiziert in %@ (pid=%d)", proc, getpid());
+        [g_out appendFormat:@"injiziert in %@ (pid=%d)\n", proc, getpid()];
 
         @try {
             AVCaptureDeviceDiscoverySession *sess = [AVCaptureDeviceDiscoverySession
@@ -31,21 +27,22 @@ static void W(NSString *fmt, ...) {
                 mediaType:AVMediaTypeVideo
                 position:AVCaptureDevicePositionUnspecified];
             NSArray *devs = sess.devices;
-            W(@"== AVCaptureDevice (Video) count=%lu ==", (unsigned long)devs.count);
+            [g_out appendFormat:@"== AVCaptureDevice (Video) count=%lu ==\n", (unsigned long)devs.count];
             for (AVCaptureDevice *d in devs) {
-                W(@"device=%@ uniqueID=%@ name=%@ model=%@ pos=%ld connected=%d",
+                [g_out appendFormat:@"device=%@ uniqueID=%@ name=%@ model=%@ pos=%ld connected=%d\n",
                   d, d.uniqueID, d.localizedName, d.modelID,
-                  (long)d.position, (int)d.connected);
+                  (long)d.position, (int)d.connected];
             }
             AVCaptureDevice *def = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeVideo];
-            W(@"default=%@ id=%@", def, def.uniqueID);
+            [g_out appendFormat:@"default=%@ id=%@\n", def, def.uniqueID];
         } @catch (NSException *e) {
-            W(@"FEHLER: %@", e);
+            [g_out appendFormat:@"FEHLER: %@\n", e];
         }
 
-        // In Datei schreiben (jbroot, für SSH-Lesezugriff)
         NSString *path = @"/var/mobile/Library/Caches/devdump.txt";
-        [g_out writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
-        L(@"geschrieben nach %@", path);
+        NSError *err = nil;
+        [g_out writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&err];
+        NSLog(@"[devdump] geschrieben nach %@ err=%@", path, err);
+        L("devdump.txt geschrieben (err=%@)", err);
     }
 }
