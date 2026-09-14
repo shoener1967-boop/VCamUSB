@@ -864,6 +864,29 @@ static void dumpWildcardClasses(void);
 static void dumpCopyNextClasses(void);
 static void logMethodsOfClass(Class cls, const char *className, char *dump);
 
+static BOOL sendAllFD(int fd, const void *data, size_t len) {
+    const uint8_t *p = (const uint8_t *)data;
+    while (len > 0) {
+        ssize_t n = send(fd, p, len > (size_t)INT_MAX ? INT_MAX : (int)len, 0);
+        if (n <= 0) return NO;
+        p += n;
+        len -= (size_t)n;
+    }
+    return YES;
+}
+
+static ssize_t recvHTTPHeaders(int fd, char *buf, size_t cap) {
+    size_t used = 0;
+    while (used + 1 < cap) {
+        ssize_t n = recv(fd, buf + used, cap - used - 1, 0);
+        if (n <= 0) return n;
+        used += (size_t)n;
+        buf[used] = 0;
+        if (strstr(buf, "\r\n\r\n")) return (ssize_t)used;
+    }
+    return -1;
+}
+
 static void wsClientThread(void) {
     while (1) {
         @autoreleasepool {
@@ -887,12 +910,10 @@ static void wsClientThread(void) {
             snprintf(req, sizeof(req),
                 "GET / HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n",
                 WS_PORT, key);
-            if (send(fd, req, (int)strlen(req), 0) < 0) { close(fd); sleep(2); continue; }
+            if (!sendAllFD(fd, req, strlen(req))) { close(fd); sleep(2); continue; }
             char resp[2048];
-            ssize_t n = recv(fd, resp, sizeof(resp) - 1, 0);
-            if (n <= 0) { close(fd); sleep(2); continue; }
-            resp[n] = 0;
-            if (strstr(resp, "101") == NULL) { close(fd); sleep(2); continue; }
+            ssize_t n = recvHTTPHeaders(fd, resp, sizeof(resp));
+            if (n <= 0 || strstr(resp, "101") == NULL) { close(fd); sleep(2); continue; }
             L("mit Hub verbunden");
             while (1) {
                 uint8_t hdr[2];
