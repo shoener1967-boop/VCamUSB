@@ -312,6 +312,9 @@ static CVPixelBufferRef makeTestPattern(void) {
 static _Atomic uint64_t g_inplaceSwap = 0;
 static _Atomic uint64_t g_inplaceMismatch = 0;
 static _Atomic uint64_t g_inplaceLockFail = 0;
+static _Atomic int64_t g_misDstFmt = 0, g_misDstW = 0, g_misDstH = 0;
+static _Atomic int64_t g_misSrcFmt = 0, g_misSrcW = 0, g_misSrcH = 0;
+static _Atomic int64_t g_fmtDumped = 0;
 
 static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
     if (!original) return NO;
@@ -331,6 +334,20 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
     size_t sw = CVPixelBufferGetWidth(src);
     size_t sh = CVPixelBufferGetHeight(src);
     OSType sfmt = CVPixelBufferGetPixelFormatType(src);
+
+    // Einmalig das erste Mismatch-Format festhalten (Diagnose: Kamera-App vs TikTok)
+    if (!atomic_load(&g_fmtDumped) && (dw != sw || dh != sh || dfmt != sfmt)) {
+        atomic_store(&g_fmtDumped, 1);
+        atomic_store(&g_misDstFmt, (int64_t)dfmt);
+        atomic_store(&g_misDstW, (int64_t)dw);
+        atomic_store(&g_misDstH, (int64_t)dh);
+        atomic_store(&g_misSrcFmt, (int64_t)sfmt);
+        atomic_store(&g_misSrcW, (int64_t)sw);
+        atomic_store(&g_misSrcH, (int64_t)sh);
+        L("INPLACE-MISMATCH dst=%c%c%c%c %zux%zu src=%c%c%c%c %zux%zu",
+          (int)(dfmt>>24)&0xff, (int)(dfmt>>16)&0xff, (int)(dfmt>>8)&0xff, (int)dfmt&0xff, dw, dh,
+          (int)(sfmt>>24)&0xff, (int)(sfmt>>16)&0xff, (int)(sfmt>>8)&0xff, (int)sfmt&0xff, sw, sh);
+    }
 
     if (dw == sw && dh == sh && dfmt == sfmt) {
         CVPixelBufferLockBaseAddress(dst, 0);
@@ -689,6 +706,16 @@ static void statusServerThread(void) {
             (unsigned long long)atomic_load(&g_passthroughFailures),
             (unsigned long long)atomic_load(&g_passthroughOrig));
         if (fw > 0) w += fw;
+        if (atomic_load(&g_fmtDumped)) {
+            int mw = snprintf(msg + w, sizeof(msg) - w, " MIS dst=0x%08x %lldx%lld src=0x%08x %lldx%lld\n",
+                (unsigned)(long long)atomic_load(&g_misDstFmt),
+                (long long)atomic_load(&g_misDstW),
+                (long long)atomic_load(&g_misDstH),
+                (unsigned)(long long)atomic_load(&g_misSrcFmt),
+                (long long)atomic_load(&g_misSrcW),
+                (long long)atomic_load(&g_misSrcH));
+            if (mw > 0) w += mw;
+        }
         if (g_methodDump[0]) {
             int mw = snprintf(msg + w, sizeof(msg) - w, "BW: %s\n", g_methodDump);
             if (mw > 0) w += mw;
