@@ -271,74 +271,8 @@ static CVPixelBufferRef makeTestPattern(void) {
     return pb;
 }
 
-// ---------------------------------------------------------------- Range-Shift
-// Decoder (libx264) liefert Video-Range (Y 16-235, UV 16-240). Der Kamera-
-// Consumer erwartet Full-Range 420f (Y 0-255, UV 0-255).
-// WICHTIG: KOPIE statt In-Place — der Decoder-Buffer gehört der VT-Session
-// und wird recycled. LordVCAM nutzt dafür VCCopyPB/blendNV12 in eigenen Buffer.
-static CVPixelBufferPoolRef g_shiftPool = NULL;
-
-static CVPixelBufferRef copyShiftToFullRange(CVPixelBufferRef src) {
-    size_t w = CVPixelBufferGetWidth(src);
-    size_t h = CVPixelBufferGetHeight(src);
-    OSType fmt = CVPixelBufferGetPixelFormatType(src);
-    if (!w || !h) return NULL;
-
-    if (!g_shiftPool) {
-        NSDictionary *attrs = @{
-            (__bridge id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange),
-            (__bridge id)kCVPixelBufferWidthKey: @(w),
-            (__bridge id)kCVPixelBufferHeightKey: @(h),
-            (__bridge id)kCVPixelBufferIOSurfacePropertiesKey: @{},
-            (__bridge id)kCVPixelBufferMetalCompatibilityKey: @YES,
-        };
-        CVPixelBufferPoolCreate(kCFAllocatorDefault, NULL,
-            (__bridge CFDictionaryRef)attrs, &g_shiftPool);
-    }
-    CVPixelBufferRef dst = NULL;
-    if (!g_shiftPool || CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, g_shiftPool, &dst) != kCVReturnSuccess || !dst) {
-        return NULL;
-    }
-
-    CVPixelBufferLockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
-    CVPixelBufferLockBaseAddress(dst, 0);
-    const uint8_t *sy = CVPixelBufferGetBaseAddressOfPlane(src, 0);
-    const uint8_t *suv = CVPixelBufferGetBaseAddressOfPlane(src, 1);
-    uint8_t *dy = CVPixelBufferGetBaseAddressOfPlane(dst, 0);
-    uint8_t *duv = CVPixelBufferGetBaseAddressOfPlane(dst, 1);
-    size_t syS = CVPixelBufferGetBytesPerRowOfPlane(src, 0);
-    size_t suvS = CVPixelBufferGetBytesPerRowOfPlane(src, 1);
-    size_t dyS = CVPixelBufferGetBytesPerRowOfPlane(dst, 0);
-    size_t duvS = CVPixelBufferGetBytesPerRowOfPlane(dst, 1);
-    if (!sy || !suv || !dy || !duv) {
-        CVPixelBufferUnlockBaseAddress(dst, 0);
-        CVPixelBufferUnlockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
-        CVPixelBufferRelease(dst);
-        return NULL;
-    }
-
-    // Y: 16..235 -> 0..255 (Kopie + Shift)
-    for (size_t r = 0; r < h; r++) {
-        const uint8_t *srow = sy + r * syS;
-        uint8_t *drow = dy + r * dyS;
-        for (size_t x = 0; x < w; x++) {
-            int v = ((int)srow[x] - 16) * 255 / 219;
-            drow[x] = (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v));
-        }
-    }
-    // Cb/Cr: 16..240 -> 0..255 (Kopie + Shift)
-    for (size_t r = 0; r < h / 2; r++) {
-        const uint8_t *srow = suv + r * suvS;
-        uint8_t *drow = duv + r * duvS;
-        for (size_t x = 0; x < w; x++) {
-            int v = ((int)srow[x] - 16) * 255 / 224;
-            drow[x] = (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v));
-        }
-    }
-    CVPixelBufferUnlockBaseAddress(dst, 0);
-    CVPixelBufferUnlockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
-    return dst;
-}
+// ---------------------------------------------------------------- Range-Shift (deaktiviert, entfernt)
+// War ein In-Place-/Kopie-Shift, der den Decoder destabilisiert hat. Passthrough nutzt ihn nicht.
 
 static CMSampleBufferRef buildSwapSampleBuffer(CMSampleBufferRef original) {
     atomic_fetch_add(&g_buildCalls, 1);
