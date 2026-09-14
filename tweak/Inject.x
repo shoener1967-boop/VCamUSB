@@ -17,7 +17,6 @@
 #import <CoreVideo/CoreVideo.h>
 #import <CoreMedia/CoreMedia.h>
 #import <VideoToolbox/VideoToolbox.h>
-#import <Accelerate/Accelerate.h>
 #import <substrate.h>
 #import <objc/runtime.h>
 #import <sys/socket.h>
@@ -207,140 +206,53 @@ static void pumpDecoder(void) {
     }
 }
 
-// ---------------------------------------------------------------- Frame-Swap
-// Ziel: echten 1440x1080 @ 420f-Buffer mit IOSurface erzeugen, Decoderframe
-// (1280x720) stride-aware skalieren, Color-Attachments vom Original übertragen.
+// ---------------------------------------------------------------- Frame-Swap (PASSTHROUGH)
+// LordVCAM-Referenz: Decoder-Buffer DIREKT durchreichen, kein Kopieren/Skalieren.
+// PC encodiert dafür nativ 1440x1080. Retain+Lock für sichere Lifetime.
 
-static CVPixelBufferPoolRef g_targetPool = NULL;
-static size_t g_targetW = 1440, g_targetH = 1080;
-
-static _Atomic int64_t g_scaledCount = 0;
-
-static void ensureTargetPool(void) {
-    if (g_targetPool) return;
-    NSDictionary *attrs = @{
-        (__bridge id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange),
-        (__bridge id)kCVPixelBufferWidthKey: @(g_targetW),
-        (__bridge id)kCVPixelBufferHeightKey: @(g_targetH),
-        (__bridge id)kCVPixelBufferIOSurfacePropertiesKey: @{},
-        (__bridge id)kCVPixelBufferMetalCompatibilityKey: @YES,
-        (__bridge id)kCVPixelBufferBytesPerRowAlignmentKey: @64,
-    };
-    CVPixelBufferPoolCreate(kCFAllocatorDefault, NULL,
-        (__bridge CFDictionaryRef)attrs, &g_targetPool);
-    if (!g_targetPool) L("Target-Pool FAIL");
-    else L("Target-Pool OK %zux%zu", g_targetW, g_targetH);
-}
-
-// vImage-basierte NV12-Skalierung: Y-Plane mit vImageScale_Planar8,
-// interleaved CbCr-Plane mit vImageScale_CbCr8 (korrekte Chroma-Paar-Behandlung).
-static void scaleNV12(CVPixelBufferRef src, CVPixelBufferRef dst) {
-    size_t sw = CVPixelBufferGetWidth(src);
-    size_t sh = CVPixelBufferGetHeight(src);
-    size_t dw = CVPixelBufferGetWidth(dst);
-    size_t dh = CVPixelBufferGetHeight(dst);
-    if (!sw || !sh || !dw || !dh) return;
-
-    CVPixelBufferLockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
-    CVPixelBufferLockBaseAddress(dst, 0);
-
-    // Y-Plane (vImageScale_Planar8)
-    vImage_Buffer srcY = {
-        .data = CVPixelBufferGetBaseAddressOfPlane(src, 0),
-        .height = sh,
-        .width = sw,
-        .rowBytes = CVPixelBufferGetBytesPerRowOfPlane(src, 0),
-    };
-    vImage_Buffer dstY = {
-        .data = CVPixelBufferGetBaseAddressOfPlane(dst, 0),
-        .height = dh,
-        .width = dw,
-        .rowBytes = CVPixelBufferGetBytesPerRowOfPlane(dst, 0),
-    };
-    vImageScale_Planar8(&srcY, &dstY, NULL, kvImageNoFlags);
-
-    // CbCr-Plane (interleaved, vImageScale_CbCr8)
-    vImage_Buffer srcUV = {
-        .data = CVPixelBufferGetBaseAddressOfPlane(src, 1),
-        .height = sh / 2,
-        .width = sw,
-        .rowBytes = CVPixelBufferGetBytesPerRowOfPlane(src, 1),
-    };
-    vImage_Buffer dstUV = {
-        .data = CVPixelBufferGetBaseAddressOfPlane(dst, 1),
-        .height = dh / 2,
-        .width = dw,
-        .rowBytes = CVPixelBufferGetBytesPerRowOfPlane(dst, 1),
-    };
-    vImageScale_CbCr8(&srcUV, &dstUV, NULL, kvImageNoFlags);
-
-    CVPixelBufferUnlockBaseAddress(dst, 0);
-    CVPixelBufferUnlockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
-}
-
-static void copyColorAttachments(CVPixelBufferRef orig, CVPixelBufferRef fake) {
-    CFArrayRef keys = (__bridge CFArrayRef)@[
-        (__bridge id)kCVImageBufferColorPrimariesKey,
-        (__bridge id)kCVImageBufferTransferFunctionKey,
-        (__bridge id)kCVImageBufferYCbCrMatrixKey,
-        (__bridge id)kCVImageBufferCGColorSpaceKey,
-        (__bridge id)kCVImageBufferChromaLocationTopFieldKey,
-        (__bridge id)kCVImageBufferChromaLocationBottomFieldKey,
-    ];
-    for (id key in (__bridge NSArray *)keys) {
-        CFTypeRef value = CVBufferGetAttachment(orig, (__bridge CFStringRef)key, NULL);
-        if (value) {
-            CVBufferSetAttachment(fake, (__bridge CFStringRef)key, value, kCVAttachmentMode_ShouldPropagate);
-        }
-    }
-}
+static _Atomic int64_t g_passthroughAttempts = 0;
+static _Atomic int64_t g_passthroughCreated = 0;
+static _Atomic int64_t g_passthroughFailures = 0;
+static _Atomic int64_t g_passthroughOrig = 0;
 
 static CMSampleBufferRef buildSwapSampleBuffer(CMSampleBufferRef original) {
-    atomic_fetch_add(&g_buildCalls, 1);
-    CVPixelBufferRef src = NULL;
+    atomic_fetch_add(&g_passthroughAttempts, 1);
+
+    // Decoder-Buffer sicher holen (Retain unter Lock)
+    CVPixelBufferRef px = NULL;
     [g_frameLock lock];
-    if (g_latestFrame) src = CVPixelBufferRetain(g_latestFrame);
+    if (g_latestFrame) px = CVPixelBufferRetain(g_latestFrame);
     [g_frameLock unlock];
-    if (!src) return NULL;
-
-    // Ziel-Dimensionen vom Original ableiten
-    if (original) {
-        CVPixelBufferRef origPB = CMSampleBufferGetImageBuffer(original);
-        if (origPB) {
-            g_targetW = CVPixelBufferGetWidth(origPB);
-            g_targetH = CVPixelBufferGetHeight(origPB);
-        }
-    }
-    ensureTargetPool();
-
-    CVPixelBufferRef out = NULL;
-    OSStatus st = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, g_targetPool, &out);
-    if (st != noErr || !out) { CVPixelBufferRelease(src); return NULL; }
-
-    scaleNV12(src, out);
-    CVPixelBufferRelease(src);
-
-    if (original) {
-        CVPixelBufferRef origPB = CMSampleBufferGetImageBuffer(original);
-        if (origPB) copyColorAttachments(origPB, out);
+    if (!px) {
+        atomic_fetch_add(&g_passthroughOrig, 1);
+        return NULL;
     }
 
+    // Format-Description aus dem tatsächlichen Decoder-Buffer (nicht raten)
     CMFormatDescriptionRef fmt = NULL;
-    st = CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, out, &fmt);
-    if (st != noErr || !fmt) { CVPixelBufferRelease(out); return NULL; }
+    OSStatus st = CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, px, &fmt);
+    if (st != noErr || !fmt) {
+        CVPixelBufferRelease(px);
+        atomic_fetch_add(&g_passthroughFailures, 1);
+        return NULL;
+    }
 
+    // Timing vom Original übernehmen
     CMSampleTimingInfo timing = {
         .duration = original ? CMSampleBufferGetDuration(original) : CMTimeMake(1, 30),
         .presentationTimeStamp = original ? CMSampleBufferGetPresentationTimeStamp(original) : CMTimeMake((int64_t)atomic_load(&g_swapCount), 30),
         .decodeTimeStamp = kCMTimeInvalid,
     };
     CMSampleBufferRef sb = NULL;
-    st = CMSampleBufferCreateReadyWithImageBuffer(kCFAllocatorDefault, out, fmt, &timing, &sb);
+    st = CMSampleBufferCreateReadyWithImageBuffer(kCFAllocatorDefault, px, fmt, &timing, &sb);
     CFRelease(fmt);
-    CVPixelBufferRelease(out);
-    if (st != noErr || !sb) return NULL;
+    CVPixelBufferRelease(px);
+    if (st != noErr || !sb) {
+        atomic_fetch_add(&g_passthroughFailures, 1);
+        return NULL;
+    }
     atomic_fetch_add(&g_swapCount, 1);
-    atomic_fetch_add(&g_scaledCount, 1);
+    atomic_fetch_add(&g_passthroughCreated, 1);
     return sb;
 }
 
@@ -450,17 +362,19 @@ static void statusServerThread(void) {
             (unsigned long long)atomic_load(&g_hasLatestFrame),
             (unsigned long long)atomic_load(&g_vtSessionAttempts),
             (long long)atomic_load(&g_vtSessionError));
-        int fw = snprintf(msg + w, sizeof(msg) - w, " origFmt=0x%08x origSize=%lldx%lld scaled=%llu target=%zux%zu decodedFmt=0x%08x decodedSize=%lldx%lld dStride=%lld/%lld\n",
+        int fw = snprintf(msg + w, sizeof(msg) - w, " origFmt=0x%08x origSize=%lldx%lld decodedFmt=0x%08x decodedSize=%lldx%lld dStride=%lld/%lld pt=%llu/%llu/%llu/%llu\n",
             (unsigned)(long long)atomic_load(&g_origPixelFormat),
             (long long)atomic_load(&g_origWidth),
             (long long)atomic_load(&g_origHeight),
-            (unsigned long long)atomic_load(&g_scaledCount),
-            g_targetW, g_targetH,
             (unsigned)(long long)atomic_load(&g_decodedFormat),
             (long long)atomic_load(&g_decodedWidth),
             (long long)atomic_load(&g_decodedHeight),
             (long long)atomic_load(&g_decodedStride0),
-            (long long)atomic_load(&g_decodedStride1));
+            (long long)atomic_load(&g_decodedStride1),
+            (unsigned long long)atomic_load(&g_passthroughAttempts),
+            (unsigned long long)atomic_load(&g_passthroughCreated),
+            (unsigned long long)atomic_load(&g_passthroughFailures),
+            (unsigned long long)atomic_load(&g_passthroughOrig));
         if (fw > 0) w += fw;
         if (g_methodDump[0]) {
             int mw = snprintf(msg + w, sizeof(msg) - w, "BW: %s\n", g_methodDump);
