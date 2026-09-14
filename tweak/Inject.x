@@ -752,23 +752,23 @@ static void wsClientThread(void) {
                             atomic_store(&g_modeBW, 0);
                             atomic_store(&g_modeFigEmit, 1);
                             atomic_store(&g_modeFigSend, 0);
-                            L(@"Modus: FIG_EMIT");
+                            L("Modus: FIG_EMIT");
                         } else if ([cmd isEqualToString:@"mode:fig_send"]) {
                             atomic_store(&g_modeBW, 0);
                             atomic_store(&g_modeFigSend, 1);
-                            L(@"Modus: FIG_SEND");
+                            L("Modus: FIG_SEND");
                         } else if ([cmd isEqualToString:@"mode:normal"]) {
                             atomic_store(&g_modeBW, 1);
                             atomic_store(&g_modeFigEmit, 0);
                             atomic_store(&g_modeFigSend, 0);
                             atomic_store(&g_modeWrapOrig, 0);
                             atomic_store(&g_modeTestPattern, 0);
-                            L(@"Modus: NORMAL");
+                            L("Modus: NORMAL");
                         } else if ([cmd isEqualToString:@"mode:observe"]) {
                             atomic_store(&g_modeBW, 0);
                             atomic_store(&g_modeFigEmit, 0);
                             atomic_store(&g_modeFigSend, 0);
-                            L(@"Modus: OBSERVE");
+                            L("Modus: OBSERVE");
                         } else if ([cmd isEqualToString:@"mode:redump"]) {
                             // Diagnose erneut ausführen (nach Kamera-Start, Klassen jetzt geladen)
                             dumpWildcardClasses();
