@@ -143,11 +143,16 @@ static void pumpDecoder(void) {
             static NSMutableData *sps, *pps;
             static dispatch_once_t once;
             dispatch_once(&once, ^{ sps = [NSMutableData data]; pps = [NSMutableData data]; });
-            if (nalType == 7) [sps setData:msg];
-            else [pps setData:msg];
 
-            if (sps.length && pps.length) {
-                // SPS/PPS neu -> alte Session/FormatDescription invalidieren
+            // Nur bei ÄNDERUNG speichern + Session neu aufbauen
+            BOOL changed = NO;
+            if (nalType == 7) {
+                if (![sps isEqualToData:msg]) { [sps setData:msg]; changed = YES; }
+            } else {
+                if (![pps isEqualToData:msg]) { [pps setData:msg]; changed = YES; }
+            }
+
+            if (changed && sps.length && pps.length) {
                 if (g_vtSession) { VTDecompressionSessionInvalidate(g_vtSession); CFRelease(g_vtSession); g_vtSession = NULL; }
                 if (g_fmtDesc) { CFRelease(g_fmtDesc); g_fmtDesc = NULL; }
 
