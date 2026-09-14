@@ -6,7 +6,7 @@
 	<dict>
 		<key>Bundles</key>
 		<array>
-			<string>com.zhilapp.tiktok</string>
+			<string>com.zhiliaoapp.musically</string>
 			<string>com.apple.mobilesafari</string>
 			<string>com.apple.WebKit.WebContent</string>
 		</array>
