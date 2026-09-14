@@ -918,8 +918,11 @@ static void wsClientThread(void) {
                 "GET / HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n",
                 WS_PORT, key);
             if (!sendAllFD(fd, req, strlen(req))) { close(fd); sleep(2); continue; }
+            L("Handshake gesendet — warte auf Antwort");
             char resp[2048];
             ssize_t n = recvHTTPHeaders(fd, resp, sizeof(resp));
+            L("recvHTTPHeaders n=%zd err=%s", n, n < 0 ? strerror(errno) : "ok");
+            if (n > 0) { resp[n < 2048 ? n : 2047] = 0; L("Antwort: %.120s", resp); }
             if (n <= 0 || strstr(resp, "101") == NULL) { close(fd); sleep(2); continue; }
             L("mit Hub verbunden");
             while (1) {
