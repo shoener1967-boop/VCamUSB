@@ -13,7 +13,11 @@ static os_log_t LOG = NULL;
         L("injiziert in %@ (pid=%d)", proc, getpid());
 
         @try {
-            NSArray *devs = [AVCaptureDevice devicesWithMediaType:AVMediaTypeVideo];
+            AVCaptureDeviceDiscoverySession *sess = [AVCaptureDeviceDiscoverySession
+                discoverySessionWithDeviceTypes:@[AVCaptureDeviceTypeBuiltInWideAngleCamera]
+                mediaType:AVMediaTypeVideo
+                position:AVCaptureDevicePositionUnspecified];
+            NSArray *devs = sess.devices;
             L("== AVCaptureDevice (Video) count=%lu ==", (unsigned long)devs.count);
             for (AVCaptureDevice *d in devs) {
                 L("device=%@ uniqueID=%@ name=%@ model=%@ pos=%ld connected=%d",
