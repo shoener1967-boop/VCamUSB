@@ -5,7 +5,7 @@
 #
 # Build:  make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
 TARGET := iphone:clang:latest:13.0
-TWEAK_NAME := VCamHub VCamInject VCamProbe
+TWEAK_NAME := VCamHub VCamInject VCamProbe VCamAVF
 
 # ---- Hub: kein Substrate (constructor + Notification-Observer), UIKit für UIWindow
 VCamHub_FILES := Hub.x
@@ -16,6 +16,11 @@ VCamHub_FRAMEWORKS := UIKit
 VCamInject_FILES := Inject.x
 VCamInject_CFLAGS := -fobjc-arc -Wno-unused-variable
 VCamInject_FRAMEWORKS := CydiaSubstrate CoreVideo CoreMedia VideoToolbox
+
+# ---- AVF: App-seitiger AVFoundation-Diagnose-Hook (Dritt-Apps)
+VCamAVF_FILES := AVF.x
+VCamAVF_CFLAGS := -fobjc-arc -Wno-unused-variable
+VCamAVF_FRAMEWORKS := CydiaSubstrate CoreMedia AVFoundation
 
 # ---- Probe: Substrate (%ctor) Canary
 VCamProbe_FILES := Probe.x
