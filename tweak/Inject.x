@@ -430,8 +430,8 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
                            CVPixelBufferGetBaseAddressOfPlane(dst, 0),
                            CVPixelBufferGetBytesPerRowOfPlane(dst, 0), dw, dh,
                            cropX, cropY, cropW, cropH);
-            // UV-Plane (halbe Auflösung)
-            scaleNV12Plane(CVPixelBufferGetBaseAddressOfPlane(src, 1),
+            // UV-Plane (halbe Auflösung, interleaved CbCr)
+            scaleNV12UVPlane(CVPixelBufferGetBaseAddressOfPlane(src, 1),
                            CVPixelBufferGetBytesPerRowOfPlane(src, 1), sw / 2, sh / 2,
                            CVPixelBufferGetBaseAddressOfPlane(dst, 1),
                            CVPixelBufferGetBytesPerRowOfPlane(dst, 1), dw / 2, dh / 2,
