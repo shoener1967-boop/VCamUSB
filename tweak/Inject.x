@@ -755,13 +755,14 @@ static void dumpCopyNextClasses(void) {
 
 // ---------------------------------------------------------------- Foto/Video-Klassen finden
 static void dumpWildcardClasses(void) {
-    // Alle Klassen mit relevantem Namensmuster finden und deren SampleBuffer-Methoden listen
+    // In lokalen Puffer bauen, am Ende atomar in g_sinkClasses kopieren (kein Race).
     int count = objc_getClassList(NULL, 0);
     Class *classes = (Class *)malloc(sizeof(Class) * count);
     count = objc_getClassList(classes, count);
+    char tmp[8192];
     size_t off = 0;
-    g_sinkClasses[0] = 0;
-    off += snprintf(g_sinkClasses + off, sizeof(g_sinkClasses) - off, "Sinks: ");
+    tmp[0] = 0;
+    off += snprintf(tmp + off, sizeof(tmp) - off, "Sinks: ");
 
     const char *patterns[] = {
         "BWStillImage", "StillImage", "BWPhoto", "Photo", "Movie", "Recording",
@@ -770,7 +771,7 @@ static void dumpWildcardClasses(void) {
     int npat = sizeof(patterns) / sizeof(patterns[0]);
     int classCount = 0;
 
-    for (int i = 0; i < count && off < sizeof(g_sinkClasses) - 400; i++) {
+    for (int i = 0; i < count && off < sizeof(tmp) - 400; i++) {
         Class cls = classes[i];
         const char *name = class_getName(cls);
         BOOL match = NO;
@@ -780,7 +781,6 @@ static void dumpWildcardClasses(void) {
         if (!match) continue;
         classCount++;
 
-        // Methoden dieser Klasse mit SampleBuffer/PixelBuffer/emit/output im Namen
         unsigned int mc = 0;
         Method *methods = class_copyMethodList(cls, &mc);
         for (unsigned int j = 0; j < mc; j++) {
@@ -788,7 +788,7 @@ static void dumpWildcardClasses(void) {
             if (strstr(mn, "ample") || strstr(mn, "ixel") || strstr(mn, "emit")
                 || strstr(mn, "utput") || strstr(mn, "eliver") || strstr(mn, "encode")
                 || strstr(mn, "hotos") || strstr(mn, "humbnail")) {
-                int w = snprintf(g_sinkClasses + off, sizeof(g_sinkClasses) - off,
+                int w = snprintf(tmp + off, sizeof(tmp) - off,
                     "%s::%s; ", name, mn);
                 if (w > 0) off += w;
             }
@@ -796,10 +796,11 @@ static void dumpWildcardClasses(void) {
         free(methods);
     }
     free(classes);
-    if (off == (size_t)snprintf(g_sinkClasses, 8, "Sinks: ")) {
-        snprintf(g_sinkClasses, sizeof(g_sinkClasses),
+    if (off == (size_t)snprintf(tmp, 8, "Sinks: ")) {
+        snprintf(tmp, sizeof(tmp),
             "Sinks: KEINE Klassen (%d Klassen insgesamt, %d gematcht)", count, classCount);
     }
+    memcpy(g_sinkClasses, tmp, sizeof(tmp));
     L("Sink-Klassen-Diagnose fertig (%d gematcht)", classCount);
 }
 
