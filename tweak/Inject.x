@@ -52,6 +52,11 @@ static _Atomic int64_t g_vtSessionError = 0;
 static char g_methodDump[4096] = {0};
 static char g_methodDump2[4096] = {0};
 
+// Modus-Steuerung über WS-Textnachrichten (Marker-Dateien funktionieren nicht,
+// weil mediaserverd eine andere /tmp-Sicht hat als die SSH-Shell!)
+static _Atomic int g_modeWrapOrig = 0;
+static _Atomic int g_modeTestPattern = 0;
+
 // ---------------------------------------------------------------- Globals
 static NSMutableArray<NSData *> *g_nalQueue = nil;
 static NSLock *g_queueLock = nil;
@@ -337,10 +342,8 @@ static CVPixelBufferRef copyShiftToFullRange(CVPixelBufferRef src) {
 static CMSampleBufferRef buildSwapSampleBuffer(CMSampleBufferRef original) {
     atomic_fetch_add(&g_passthroughAttempts, 1);
 
-    // Testmuster-Modus: konstantes Grau statt Decoderframe
-    BOOL testMode = (access("/tmp/vcam_testpattern", F_OK) == 0);
-    // Wrap-Original-Modus: ORIGINAL-CVPixelBuffer in NEUEN CMSampleBuffer wrappen
-    BOOL wrapOrigMode = (access("/tmp/vcam_wraporig", F_OK) == 0);
+    BOOL testMode = atomic_load(&g_modeTestPattern) != 0;
+    BOOL wrapOrigMode = atomic_load(&g_modeWrapOrig) != 0;
 
     CVPixelBufferRef px = NULL;
     if (wrapOrigMode) {
@@ -682,6 +685,25 @@ static void wsClientThread(void) {
                 if (masked) for (uint64_t i = 0; i < plen; i++) payload[i] ^= mask[i & 3];
                 if (opcode == 0x2) {
                     enqueueNal([NSData dataWithBytesNoCopy:payload length:(NSUInteger)plen freeWhenDone:YES]);
+                } else if (opcode == 0x1) {
+                    // Text-Nachricht = Modus-Steuerung
+                    NSString *cmd = [[NSString alloc] initWithBytes:payload length:(NSUInteger)plen encoding:NSUTF8StringEncoding];
+                    if (cmd) {
+                        if ([cmd isEqualToString:@"mode:wrap_orig"]) {
+                            atomic_store(&g_modeWrapOrig, 1);
+                            atomic_store(&g_modeTestPattern, 0);
+                            L("Modus: WRAP_ORIG");
+                        } else if ([cmd isEqualToString:@"mode:testpattern"]) {
+                            atomic_store(&g_modeTestPattern, 1);
+                            atomic_store(&g_modeWrapOrig, 0);
+                            L("Modus: TESTPATTERN");
+                        } else if ([cmd isEqualToString:@"mode:normal"]) {
+                            atomic_store(&g_modeWrapOrig, 0);
+                            atomic_store(&g_modeTestPattern, 0);
+                            L("Modus: NORMAL");
+                        }
+                    }
+                    free(payload);
                 } else {
                     free(payload);
                 }
