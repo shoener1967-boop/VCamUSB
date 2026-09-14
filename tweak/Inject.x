@@ -770,7 +770,6 @@ static void dumpWildcardClasses(void) {
         // Methoden dieser Klasse mit SampleBuffer/PixelBuffer/emit/output im Namen
         unsigned int mc = 0;
         Method *methods = class_copyMethodList(cls, &mc);
-        int mfound = 0;
         for (unsigned int j = 0; j < mc; j++) {
             const char *mn = sel_getName(method_getName(methods[j]));
             if (strstr(mn, "ample") || strstr(mn, "ixel") || strstr(mn, "emit")
@@ -779,7 +778,6 @@ static void dumpWildcardClasses(void) {
                 int w = snprintf(g_sinkClasses + off, sizeof(g_sinkClasses) - off,
                     "%s::%s; ", name, mn);
                 if (w > 0) off += w;
-                mfound++;
             }
         }
         free(methods);
