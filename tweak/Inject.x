@@ -265,6 +265,40 @@ static CVPixelBufferRef makeTestPattern(void) {
     return pb;
 }
 
+// ---------------------------------------------------------------- Range-Shift
+// Decoder (libx264) liefert Video-Range (Y 16-235, UV 16-240). Der Kamera-
+// Consumer erwartet Full-Range 420f (Y 0-255, UV 0-255). Konvertierung inline.
+static void shiftToFullRange(CVPixelBufferRef px) {
+    size_t w = CVPixelBufferGetWidth(px);
+    size_t h = CVPixelBufferGetHeight(px);
+    if (!w || !h) return;
+
+    CVPixelBufferLockBaseAddress(px, 0);
+    uint8_t *y = CVPixelBufferGetBaseAddressOfPlane(px, 0);
+    uint8_t *uv = CVPixelBufferGetBaseAddressOfPlane(px, 1);
+    size_t yS = CVPixelBufferGetBytesPerRowOfPlane(px, 0);
+    size_t uvS = CVPixelBufferGetBytesPerRowOfPlane(px, 1);
+    if (!y || !uv) { CVPixelBufferUnlockBaseAddress(px, 0); return; }
+
+    // Y: 16..235 -> 0..255
+    for (size_t r = 0; r < h; r++) {
+        uint8_t *row = y + r * yS;
+        for (size_t x = 0; x < w; x++) {
+            int v = ((int)row[x] - 16) * 255 / 219;
+            row[x] = (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v));
+        }
+    }
+    // Cb/Cr: 16..240 -> 0..255
+    for (size_t r = 0; r < h / 2; r++) {
+        uint8_t *row = uv + r * uvS;
+        for (size_t x = 0; x < w; x++) {
+            int v = ((int)row[x] - 16) * 255 / 224;
+            row[x] = (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v));
+        }
+    }
+    CVPixelBufferUnlockBaseAddress(px, 0);
+}
+
 static CMSampleBufferRef buildSwapSampleBuffer(CMSampleBufferRef original) {
     atomic_fetch_add(&g_passthroughAttempts, 1);
 
@@ -281,6 +315,7 @@ static CMSampleBufferRef buildSwapSampleBuffer(CMSampleBufferRef original) {
         [g_frameLock lock];
         if (g_latestFrame) px = CVPixelBufferRetain(g_latestFrame);
         [g_frameLock unlock];
+        if (px) shiftToFullRange(px);
     }
     if (!px) {
         atomic_fetch_add(&g_passthroughOrig, 1);
