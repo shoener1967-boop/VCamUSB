@@ -450,20 +450,20 @@ typedef struct {
     char className[96];
 } OutputEntry;
 
-static OutputEntry g_outputs[32] = {0};
+static OutputEntry g_outputs[128] = {0};
 static pthread_mutex_t g_objMutex = PTHREAD_MUTEX_INITIALIZER;
 
 static void trackObject(id self) {
     uintptr_t object = (uintptr_t)self;
     pthread_mutex_lock(&g_objMutex);
-    for (size_t i = 0; i < 32; i++) {
+    for (size_t i = 0; i < 128; i++) {
         if (g_outputs[i].object == object) {
             g_outputs[i].calls++;
             pthread_mutex_unlock(&g_objMutex);
             return;
         }
     }
-    for (size_t i = 0; i < 32; i++) {
+    for (size_t i = 0; i < 128; i++) {
         if (g_outputs[i].object == 0) {
             g_outputs[i].object = object;
             g_outputs[i].calls = 1;
@@ -590,7 +590,7 @@ static void statusServerThread(void) {
         {
             pthread_mutex_lock(&g_objMutex);
             int used = 0;
-            for (int i = 0; i < 32; i++) {
+            for (int i = 0; i < 128; i++) {
                 if (g_outputs[i].object == 0) break;
                 used++;
             }
