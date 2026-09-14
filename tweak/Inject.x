@@ -305,6 +305,76 @@ static CVPixelBufferRef makeTestPattern(void) {
 // ---------------------------------------------------------------- Range-Shift (deaktiviert, entfernt)
 // War ein In-Place-/Kopie-Shift, der den Decoder destabilisiert hat. Passthrough nutzt ihn nicht.
 
+// ---------------------------------------------------------------- In-place Pixel-Swap (LordVCAM-Stil)
+// Kopiert die Pixel von g_latestFrame in den ORIGINALEN CVPixelBuffer und lässt
+// den original CMSampleBuffer (Timing/Attachments/Pool) komplett unangetastet.
+// Das vermeidet den Crash, den ein NEUER SampleBuffer bei TikTok/WebRTC auslöst.
+static _Atomic uint64_t g_inplaceSwap = 0;
+static _Atomic uint64_t g_inplaceMismatch = 0;
+static _Atomic uint64_t g_inplaceLockFail = 0;
+
+static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
+    if (!original) return NO;
+    CVPixelBufferRef dst = CMSampleBufferGetImageBuffer(original);
+    if (!dst) return NO;
+
+    CVPixelBufferRef src = NULL;
+    [g_frameLock lock];
+    if (g_latestFrame) src = CVPixelBufferRetain(g_latestFrame);
+    [g_frameLock unlock];
+    if (!src) return NO;
+
+    BOOL ok = NO;
+    size_t dw = CVPixelBufferGetWidth(dst);
+    size_t dh = CVPixelBufferGetHeight(dst);
+    OSType dfmt = CVPixelBufferGetPixelFormatType(dst);
+    size_t sw = CVPixelBufferGetWidth(src);
+    size_t sh = CVPixelBufferGetHeight(src);
+    OSType sfmt = CVPixelBufferGetPixelFormatType(src);
+
+    if (dw == sw && dh == sh && dfmt == sfmt) {
+        CVPixelBufferLockBaseAddress(dst, 0);
+        CVPixelBufferLockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
+
+        size_t planes = CVPixelBufferGetPlaneCount(dst);
+        if (planes == 0) {
+            // single-plane (z.B. BGRA)
+            void *dp = CVPixelBufferGetBaseAddress(dst);
+            const void *sp = CVPixelBufferGetBaseAddress(src);
+            size_t db = CVPixelBufferGetBytesPerRow(dst);
+            size_t sb = CVPixelBufferGetBytesPerRow(src);
+            size_t h = CVPixelBufferGetHeight(dst);
+            size_t copy = db < sb ? db : sb;
+            for (size_t y = 0; y < h; y++) {
+                memcpy((uint8_t *)dp + y * db, (const uint8_t *)sp + y * sb, copy);
+            }
+            ok = YES;
+        } else {
+            for (size_t p = 0; p < planes; p++) {
+                void *dp = CVPixelBufferGetBaseAddressOfPlane(dst, p);
+                const void *sp = CVPixelBufferGetBaseAddressOfPlane(src, p);
+                if (!dp || !sp) continue;
+                size_t db = CVPixelBufferGetBytesPerRowOfPlane(dst, p);
+                size_t sb = CVPixelBufferGetBytesPerRowOfPlane(src, p);
+                size_t h = CVPixelBufferGetHeightOfPlane(dst, p);
+                size_t copy = db < sb ? db : sb;
+                for (size_t y = 0; y < h; y++) {
+                    memcpy((uint8_t *)dp + y * db, (const uint8_t *)sp + y * sb, copy);
+                }
+            }
+            ok = YES;
+        }
+
+        CVPixelBufferUnlockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
+        CVPixelBufferUnlockBaseAddress(dst, 0);
+    }
+
+    CVPixelBufferRelease(src);
+    if (ok) atomic_fetch_add(&g_inplaceSwap, 1);
+    else atomic_fetch_add(&g_inplaceMismatch, 1);
+    return ok;
+}
+
 static CMSampleBufferRef buildSwapSampleBuffer(CMSampleBufferRef original) {
     atomic_fetch_add(&g_buildCalls, 1);
     atomic_fetch_add(&g_passthroughAttempts, 1);
@@ -546,17 +616,13 @@ static void trackObject(id self) {
         }
     }
 
-    CMSampleBufferRef fake = buildSwapSampleBuffer((__bridge CMSampleBufferRef)sampleBuffer);
-
-    // Einmalig: Handoff-Diagnose (Original vs. Ersatz) + konkrete Klasse
-    if (!atomic_load(&g_handoffDumped)) dumpHandoff(sampleBuffer, fake);
-    if (!atomic_load(&g_hookClassChecked)) dumpHookClass(self);
-
-    if (fake) {
-        %orig((__bridge id)fake);
-        CFRelease(fake);
+    // In-place Pixel-Swap: Fake-Pixel in den ORIGINALEN Buffer kopieren,
+    // original SampleBuffer (Timing/Attachments) bleibt unangetastet.
+    if (swapPixelsInPlace((__bridge CMSampleBufferRef)sampleBuffer)) {
+        %orig;
         return;
     }
+
     atomic_fetch_add(&g_origCount, 1);
     %orig;
 }
@@ -583,7 +649,7 @@ static void statusServerThread(void) {
             "rxNal=%llu sps=%llu pps=%llu idr=%llu "
             "wsBin=%llu wsText=%llu wsBytes=%llu "
             "formatDesc=%llu submit=%llu output=%llu errors=%llu "
-            "emit=%llu send=%llu figEmitRep=%llu figSendRep=%llu build=%llu swap=%llu swapMismatch=%llu orig=%llu hasFrame=%llu "
+            "emit=%llu send=%llu figEmitRep=%llu figSendRep=%llu build=%llu swap=%llu swapMismatch=%llu inplace=%llu inplaceMis=%llu orig=%llu hasFrame=%llu "
             "vtAttempts=%llu vtError=%lld\n",
             (unsigned long long)atomic_load(&g_rxNalCount),
             (unsigned long long)atomic_load(&g_spsCount),
@@ -603,6 +669,8 @@ static void statusServerThread(void) {
             (unsigned long long)atomic_load(&g_buildCalls),
             (unsigned long long)atomic_load(&g_swapCount),
             (unsigned long long)atomic_load(&g_swapSizeMismatch),
+            (unsigned long long)atomic_load(&g_inplaceSwap),
+            (unsigned long long)atomic_load(&g_inplaceMismatch),
             (unsigned long long)atomic_load(&g_origCount),
             (unsigned long long)atomic_load(&g_hasLatestFrame),
             (unsigned long long)atomic_load(&g_vtSessionAttempts),
