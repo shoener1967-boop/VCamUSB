@@ -337,11 +337,18 @@ static CVPixelBufferRef copyShiftToFullRange(CVPixelBufferRef src) {
 static CMSampleBufferRef buildSwapSampleBuffer(CMSampleBufferRef original) {
     atomic_fetch_add(&g_passthroughAttempts, 1);
 
-    // Testmuster-Modus?
+    // Testmuster-Modus: konstantes Grau statt Decoderframe
     BOOL testMode = (access("/tmp/vcam_testpattern", F_OK) == 0);
+    // Wrap-Original-Modus: ORIGINAL-CVPixelBuffer in NEUEN CMSampleBuffer wrappen
+    BOOL wrapOrigMode = (access("/tmp/vcam_wraporig", F_OK) == 0);
 
     CVPixelBufferRef px = NULL;
-    if (testMode) {
+    if (wrapOrigMode) {
+        // Astras Test A: Original-PixelBuffer, neuer SampleBuffer
+        CVPixelBufferRef origPB = original ? CMSampleBufferGetImageBuffer(original) : NULL;
+        if (origPB) px = CVPixelBufferRetain(origPB);
+        atomic_fetch_add(&g_testPatternUsed, 1);
+    } else if (testMode) {
         if (!g_testPattern) g_testPattern = makeTestPattern();
         if (g_testPattern) px = CVPixelBufferRetain(g_testPattern);
         atomic_fetch_add(&g_testPatternUsed, 1);
