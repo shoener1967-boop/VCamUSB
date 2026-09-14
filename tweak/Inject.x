@@ -897,9 +897,6 @@ static void wsClientThread(void) {
         @autoreleasepool {
             int fd = socket(AF_INET, SOCK_STREAM, 0);
             if (fd < 0) { L("socket fehlgeschlagen errno=%d %s", errno, strerror(errno)); sleep(2); continue; }
-            struct timeval tv = { .tv_sec = 3, .tv_usec = 0 };
-            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
             struct sockaddr_in addr = {0};
             addr.sin_family = AF_INET;
             addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
