@@ -51,6 +51,7 @@ static _Atomic uint64_t g_vtSessionAttempts = 0;
 static _Atomic int64_t g_vtSessionError = 0;
 static char g_methodDump[4096] = {0};
 static char g_methodDump2[4096] = {0};
+static char g_copyClasses[4096] = {0};
 
 // Modus-Steuerung über WS-Textnachrichten (Marker-Dateien funktionieren nicht,
 // weil mediaserverd eine andere /tmp-Sicht hat als die SSH-Shell!)
@@ -744,12 +745,10 @@ static void logMethodsOfClass(Class cls, const char *className, char *dump) {
 }
 
 // ---------------------------------------------------------------- copyNext-Klassen finden
-static char g_copyClasses[4096] = {0};
-
 static void dumpCopyNextClasses(void) {
     SEL sel = sel_registerName("copyNextSampleBuffer:");
     int count = objc_getClassList(NULL, 0);
-    Class *classes = malloc(sizeof(Class) * count);
+    Class *classes = (Class *)malloc(sizeof(Class) * count);
     count = objc_getClassList(classes, count);
     size_t off = 0;
     g_copyClasses[0] = 0;
