@@ -344,7 +344,7 @@ static void scaleNV12UVPlane(const uint8_t *sp, size_t srcStride, size_t srcW, s
                              size_t cropX, size_t cropY, size_t cropW, size_t cropH) {
     for (size_t y = 0; y < dstH; y++) {
         size_t sy = cropY + (y * cropH) / dstH;
-        const uint8_t *srcRow = sp + sy * srcStride;
+        const uint8_t *srcRow = sp + sy * srcStride + cropX * 2;
         uint8_t *dstRow = dp + y * dstStride;
         for (size_t x = 0; x < dstW; x++) {
             size_t sx = cropX + (x * cropW) / dstW;
