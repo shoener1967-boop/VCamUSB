@@ -48,7 +48,7 @@ log = logging.getLogger("vcam")
 
 DASHBOARD_PORT = 8080
 DEFAULT_DEVICE = "OBS Virtual Camera"
-WIDTH, HEIGHT = 1440, 1080
+WIDTH, HEIGHT = 1280, 720
 DEFAULT_FPS = 30
 DASH_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard.html")
 UPLOAD_DIR = os.path.join(os.environ.get("TEMP", "/tmp"), "vcamusb_uploads")

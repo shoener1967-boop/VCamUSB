@@ -1,0 +1,10 @@
+# Build/Download-Artefakte
+dl_*/
+*.deb
+__pycache__/
+*.pyc
+.venv/
+.theos/
+tools/
+dev_*.dylib
+*.sig
