@@ -693,6 +693,7 @@ async def main():
     ap.add_argument("--source", choices=["cam", "file"], default="cam")
     ap.add_argument("--video", default="")
     ap.add_argument("--device", default="")
+    ap.add_argument("--camera-id", default="")
     ap.add_argument("--ip", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8767)
     ap.add_argument("--list-cameras", action="store_true")
@@ -703,8 +704,9 @@ async def main():
             print(c)
         return
 
+    device_arg = a.camera_id or a.device or DEFAULT_DEVICE
     state = {
-        "want": ("file", a.video) if (a.source == "file" and a.video) else ("cam", a.device or DEFAULT_DEVICE),
+        "want": ("file", a.video) if (a.source == "file" and a.video) else ("cam", device_arg),
         "transform": {"zoom": 1.0, "pan_x": 0.0, "pan_y": 0.0, "flip_h": False,
                       "rotation": 0, "bg_color": [0, 0, 0]},
         "filters": {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "gamma": 1.0},
