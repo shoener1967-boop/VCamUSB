@@ -7,11 +7,6 @@ static os_log_t LOG = NULL;
     os_log(LOG, "%s: " FMT, __func__, ##__VA_ARGS__); } while (0)
 
 static NSMutableString *g_out = nil;
-static void W(NSString *s) {
-    [g_out appendString:s];
-    [g_out appendString:@"\n"];
-    NSLog(@"[devdump] %@", s);
-}
 
 %ctor {
     @autoreleasepool {
