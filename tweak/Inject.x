@@ -1,5 +1,8 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
+// ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
+#define VCAM_BUILD_ID "ws-debug-2026-09-14-02"
+
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
 //
@@ -890,19 +893,25 @@ static ssize_t recvHTTPHeaders(int fd, char *buf, size_t cap) {
 static void wsClientThread(void) {
     L("wsClientThread gestartet");
     while (1) {
+        L("WS-Verbindungsversuch");
         @autoreleasepool {
             int fd = socket(AF_INET, SOCK_STREAM, 0);
-            if (fd < 0) { sleep(2); continue; }
+            if (fd < 0) { L("socket fehlgeschlagen errno=%d %s", errno, strerror(errno)); sleep(2); continue; }
+            struct timeval tv = { .tv_sec = 3, .tv_usec = 0 };
+            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
             struct sockaddr_in addr = {0};
             addr.sin_family = AF_INET;
             addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
             addr.sin_port = htons(WS_PORT);
+            L("vor connect fd=%d", fd);
             if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-                L("connect zum Hub fehlgeschlagen: %s", strerror(errno));
+                L("connect fehlgeschlagen errno=%d %s", errno, strerror(errno));
                 close(fd);
                 sleep(2);
                 continue;
             }
+            L("connect erfolgreich");
             char key[32];
             srand((unsigned)time(NULL));
             for (int i = 0; i < 24; i++) key[i] = "abcdefghijklmnopqrstuvwxyz0123456789"[rand() % 36];
@@ -1190,9 +1199,16 @@ static void dumpWildcardClasses(void) {
     g_queueLock = [NSLock new];
     g_frameLock = [NSLock new];
 
+    L("VCamInject build=%s", VCAM_BUILD_ID);
+    L("vor WS-Dispatch");
+
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        L("WS-Block betreten");
         wsClientThread();
+        L("WS-Thread beendet");
     });
+
+    L("nach WS-Dispatch");
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
         while (1) {
             pumpDecoder();
