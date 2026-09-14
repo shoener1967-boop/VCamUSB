@@ -601,6 +601,10 @@ static void statusServerThread(void) {
             int mw = snprintf(msg + w, sizeof(msg) - w, "FigCap: %s\n", g_methodDump2);
             if (mw > 0) w += mw;
         }
+        if (g_copyClasses[0]) {
+            int mw = snprintf(msg + w, sizeof(msg) - w, "COPYNEXT: %s\n", g_copyClasses);
+            if (mw > 0) w += mw;
+        }
         if (atomic_load(&g_handoffDumped)) {
             int mw = snprintf(msg + w, sizeof(msg) - w,
                 "HANDOFF orig(v=%lld r=%lld s=%lld img=%lld data=%lld fmt=%lld surf=%lld/%lld fr=%lld) "
@@ -739,6 +743,37 @@ static void logMethodsOfClass(Class cls, const char *className, char *dump) {
     L("Methoden von %s erfasst", className);
 }
 
+// ---------------------------------------------------------------- copyNext-Klassen finden
+static char g_copyClasses[4096] = {0};
+
+static void dumpCopyNextClasses(void) {
+    SEL sel = sel_registerName("copyNextSampleBuffer:");
+    int count = objc_getClassList(NULL, 0);
+    Class *classes = malloc(sizeof(Class) * count);
+    count = objc_getClassList(classes, count);
+    size_t off = 0;
+    g_copyClasses[0] = 0;
+    off += snprintf(g_copyClasses + off, sizeof(g_copyClasses) - off, "copyNextSampleBuffer Klassen: ");
+    int found = 0;
+    for (int i = 0; i < count && off < sizeof(g_copyClasses) - 200; i++) {
+        Class cls = classes[i];
+        unsigned int mc = 0;
+        Method *methods = class_copyMethodList(cls, &mc);
+        for (unsigned int j = 0; j < mc; j++) {
+            if (method_getName(methods[j]) == sel) {
+                const char *enc = method_getTypeEncoding(methods[j]);
+                int w = snprintf(g_copyClasses + off, sizeof(g_copyClasses) - off,
+                    "%s|%s; ", class_getName(cls), enc ? enc : "?");
+                if (w > 0) off += w;
+                found++;
+            }
+        }
+        free(methods);
+    }
+    free(classes);
+    L("copyNextSampleBuffer: %d Klassen gefunden", found);
+}
+
 // ---------------------------------------------------------------- ctor
 %ctor {
     NSString *proc = [[NSProcessInfo processInfo] processName];
@@ -750,6 +785,7 @@ static void logMethodsOfClass(Class cls, const char *className, char *dump) {
                    dispatch_get_main_queue(), ^{
         logMethodsOfClass(NSClassFromString(@"BWNodeOutput"), "BWNodeOutput", g_methodDump);
         logMethodsOfClass(NSClassFromString(@"FigCaptureClientSessionMonitor"), "FigCaptureClientSessionMonitor", g_methodDump2);
+        dumpCopyNextClasses();
     });
 
     g_nalQueue = [NSMutableArray array];
