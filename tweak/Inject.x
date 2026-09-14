@@ -888,6 +888,7 @@ static ssize_t recvHTTPHeaders(int fd, char *buf, size_t cap) {
 }
 
 static void wsClientThread(void) {
+    L("wsClientThread gestartet");
     while (1) {
         @autoreleasepool {
             int fd = socket(AF_INET, SOCK_STREAM, 0);
