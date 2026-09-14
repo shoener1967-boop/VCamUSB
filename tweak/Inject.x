@@ -81,6 +81,12 @@ static NSData *dequeueNal(void) {
 }
 
 // ---------------------------------------------------------------- Decoder
+static _Atomic int64_t g_decodedFormat = 0;
+static _Atomic int64_t g_decodedWidth = 0;
+static _Atomic int64_t g_decodedHeight = 0;
+static _Atomic int64_t g_decodedStride0 = 0;
+static _Atomic int64_t g_decodedStride1 = 0;
+
 static void decompressionOutputCallback(void *refCon, void *srcRef,
     OSStatus status, VTDecodeInfoFlags info, CVPixelBufferRef imageBuffer,
     CMTime pts, CMTime duration) {
@@ -90,6 +96,24 @@ static void decompressionOutputCallback(void *refCon, void *srcRef,
     }
     if (!imageBuffer) return;
     atomic_fetch_add(&g_decodeOutputCount, 1);
+
+    // Einmalig: tatsächliches Decoder-Output-Format messen (nicht raten)
+    if (atomic_load(&g_decodedFormat) == 0) {
+        OSType fmt = CVPixelBufferGetPixelFormatType(imageBuffer);
+        size_t w = CVPixelBufferGetWidth(imageBuffer);
+        size_t h = CVPixelBufferGetHeight(imageBuffer);
+        size_t s0 = CVPixelBufferGetBytesPerRowOfPlane(imageBuffer, 0);
+        size_t s1 = CVPixelBufferGetPlaneCount(imageBuffer) > 1
+            ? CVPixelBufferGetBytesPerRowOfPlane(imageBuffer, 1) : 0;
+        atomic_store(&g_decodedFormat, (int64_t)fmt);
+        atomic_store(&g_decodedWidth, (int64_t)w);
+        atomic_store(&g_decodedHeight, (int64_t)h);
+        atomic_store(&g_decodedStride0, (int64_t)s0);
+        atomic_store(&g_decodedStride1, (int64_t)s1);
+        L("DECODED fmt=0x%08x (%c%c%c%c) %zux%zu stride=%zu/%zu",
+          (unsigned)fmt, (int)(fmt>>24)&0xff, (int)(fmt>>16)&0xff,
+          (int)(fmt>>8)&0xff, (int)fmt&0xff, w, h, s0, s1);
+    }
 
     [g_frameLock lock];
     if (g_latestFrame) CVPixelBufferRelease(g_latestFrame);
@@ -426,12 +450,17 @@ static void statusServerThread(void) {
             (unsigned long long)atomic_load(&g_hasLatestFrame),
             (unsigned long long)atomic_load(&g_vtSessionAttempts),
             (long long)atomic_load(&g_vtSessionError));
-        int fw = snprintf(msg + w, sizeof(msg) - w, " origFmt=0x%08x origSize=%lldx%lld scaled=%llu target=%zux%zu\n",
+        int fw = snprintf(msg + w, sizeof(msg) - w, " origFmt=0x%08x origSize=%lldx%lld scaled=%llu target=%zux%zu decodedFmt=0x%08x decodedSize=%lldx%lld dStride=%lld/%lld\n",
             (unsigned)(long long)atomic_load(&g_origPixelFormat),
             (long long)atomic_load(&g_origWidth),
             (long long)atomic_load(&g_origHeight),
             (unsigned long long)atomic_load(&g_scaledCount),
-            g_targetW, g_targetH);
+            g_targetW, g_targetH,
+            (unsigned)(long long)atomic_load(&g_decodedFormat),
+            (long long)atomic_load(&g_decodedWidth),
+            (long long)atomic_load(&g_decodedHeight),
+            (long long)atomic_load(&g_decodedStride0),
+            (long long)atomic_load(&g_decodedStride1));
         if (fw > 0) w += fw;
         if (g_methodDump[0]) {
             int mw = snprintf(msg + w, sizeof(msg) - w, "BW: %s\n", g_methodDump);
