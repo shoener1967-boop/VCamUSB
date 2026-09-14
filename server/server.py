@@ -270,6 +270,8 @@ class Encoder:
              "-r", str(fps), "-i", "-",
              "-an", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
              "-pix_fmt", "yuv420p", "-g", str(fps * 2), "-b:v", "3M",
+             "-x264-params", "aud=1:bframes=0:keyint=30:min-keyint=30:scenecut=0",
+             "-color_range", "pc",
              "-f", "h264", "-flush_packets", "1", self.pipe],
             stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
@@ -385,6 +387,7 @@ class FramePusher:
 
     async def run(self):
         from websockets.asyncio.client import connect
+        import struct as _struct
         while not self._closed:
             try:
                 async with connect(f"ws://{self.ip}:{self.port}",
@@ -396,41 +399,105 @@ class FramePusher:
                     # wait for pipe
                     while not os.path.exists(self.pipe) and not self._closed:
                         await asyncio.sleep(0.1)
+
+                    # Persistenter Annex-B-Puffer + AU-Zusammenbau.
+                    # libx264 mit aud=1: vor jedem Frame ein AUD-NAL (Typ 9).
+                    # Wir gruppieren NALs zu Access Units und senden:
+                    #   - SPS/PPS als eigene Message (roh, erstes Byte 0x67/0x68)
+                    #   - jede AU als AVCC-Message ([4-byte len][NAL]...)
+                    buf = b""
+                    cur_au = []          # gesammelte VCL/SEI-NALs der aktuellen AU
+                    sent_sps_pps = False
+
+                    def parse_nals(data):
+                        """Liefert Liste von rohen NAL-Bytes (ohne Startcode)."""
+                        nals = []
+                        i = 0
+                        n = len(data)
+                        start = 0
+                        # Finde Startcodes
+                        positions = []
+                        while i < n - 2:
+                            if data[i] == 0 and data[i+1] == 0:
+                                if data[i+2] == 1:
+                                    positions.append((i, 3))
+                                    i += 3
+                                    continue
+                                elif i+3 < n and data[i+2] == 0 and data[i+3] == 1:
+                                    positions.append((i, 4))
+                                    i += 4
+                                    continue
+                            i += 1
+                        for idx in range(len(positions)):
+                            sc_pos, sc_len = positions[idx]
+                            end = positions[idx+1][0] if idx+1 < len(positions) else n
+                            nal = data[sc_pos + sc_len:end]
+                            if nal:
+                                nals.append(nal)
+                        return nals
+
+                    def nal_type(nal):
+                        return nal[0] & 0x1f if nal else 0
+
+                    def flush_au(ws):
+                        nonlocal cur_au, sent_sps_pps
+                        if not cur_au:
+                            return
+                        # AVCC: [4-byte BE length][NAL]... für alle NALs der AU
+                        avcc = b""
+                        for nal in cur_au:
+                            avcc += _struct.pack(">I", len(nal)) + nal
+                        cur_au = []
+                        if avcc:
+                            self.state["bytes_sent"] += len(avcc)
+                            self.state["frames_sent"] += 1
+                            return ws.send(avcc)
+
                     with open(self.pipe, "rb") as f:
                         while not self._closed:
                             chunk = f.read(64 * 1024)
                             if not chunk:
                                 await asyncio.sleep(0.05)
                                 continue
-                            # NAL-Grenzen respektieren: jedes NAL einzeln senden
-                            # (der iPhone-Decoder erwartet 1 NAL pro WS-Message)
-                            start = 0
+                            buf += chunk
+                            # Startcode-Positionen finden
+                            positions = []
                             i = 0
-                            n = len(chunk)
-                            while i < n - 3:
-                                if chunk[i] == 0 and chunk[i + 1] == 0:
-                                    if chunk[i + 2] == 1:
-                                        if start < i:
-                                            await ws.send(chunk[start:i])
-                                            self.state["bytes_sent"] += (i - start)
-                                            self.state["frames_sent"] += 1
-                                        start = i + 3
+                            n = len(buf)
+                            while i < n - 2:
+                                if buf[i] == 0 and buf[i+1] == 0:
+                                    if buf[i+2] == 1:
+                                        positions.append((i, 3))
                                         i += 3
                                         continue
-                                    elif i + 3 < n and chunk[i + 2] == 0 and chunk[i + 3] == 1:
-                                        if start < i:
-                                            await ws.send(chunk[start:i])
-                                            self.state["bytes_sent"] += (i - start)
-                                            self.state["frames_sent"] += 1
-                                        start = i + 4
+                                    elif i+3 < n and buf[i+2] == 0 and buf[i+3] == 1:
+                                        positions.append((i, 4))
                                         i += 4
                                         continue
                                 i += 1
-                            if start < n:
-                                await ws.send(chunk[start:n])
-                                self.state["bytes_sent"] += (n - start)
-                                self.state["frames_sent"] += 1
-                            await asyncio.sleep(0.003)
+                            if not positions:
+                                if len(buf) > 1_000_000:
+                                    buf = b""
+                                continue
+                            # Verarbeite alle vollständigen NALs (alle bis auf die letzte)
+                            # Die letzte könnte unvollständig sein -> im Puffer lassen
+                            last_start = positions[-1][0]
+                            complete = buf[:last_start]
+                            buf = buf[last_start:]   # Rest ab letztem Startcode behalten
+                            # NALs aus dem kompletten Teil extrahieren
+                            nals = parse_nals(complete)
+                            for nal in nals:
+                                t = nal_type(nal)
+                                if t == 7 or t == 8:
+                                    # SPS/PPS: eigene Message (roh)
+                                    await ws.send(nal)
+                                    self.state["bytes_sent"] += len(nal)
+                                elif t == 9:
+                                    # AUD: aktuelle AU abschließen
+                                    await flush_au(ws)
+                                elif t == 1 or t == 5 or t == 6:
+                                    cur_au.append(nal)
+                            await asyncio.sleep(0.001)
             except Exception as e:
                 self.state["connected"] = False
                 if not self._closed:

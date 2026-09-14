@@ -84,7 +84,6 @@ static NSData *dequeueNal(void) {
     [g_queueLock unlock];
     return nal;
 }
-
 // ---------------------------------------------------------------- Decoder
 static _Atomic int64_t g_decodedFormat = 0;
 static _Atomic int64_t g_decodedWidth = 0;
@@ -129,24 +128,29 @@ static void decompressionOutputCallback(void *refCon, void *srcRef,
 
 static void pumpDecoder(void) {
     @autoreleasepool {
-        NSData *nal = dequeueNal();
-        if (!nal) return;
-        const uint8_t *bytes = (const uint8_t *)nal.bytes;
+        NSData *msg = dequeueNal();   // jetzt: SPS/PPS (roh) ODER komplette AU (AVCC)
+        if (!msg) return;
+        const uint8_t *bytes = (const uint8_t *)msg.bytes;
         uint8_t nalType = bytes[0] & 0x1f;
 
         atomic_fetch_add(&g_rxNalCount, 1);
-        if (nalType == 7) atomic_fetch_add(&g_spsCount, 1);
-        else if (nalType == 8) atomic_fetch_add(&g_ppsCount, 1);
-        else if (nalType == 5) atomic_fetch_add(&g_idrCount, 1);
 
-        // --- Format-Description aus SPS+PPS aufbauen (AVCC, lengthSize=4) ---
-        if (g_fmtDesc == NULL) {
+        // SPS/PPS: rohe NAL, erstes Byte 0x67 (SPS) / 0x68 (PPS)
+        if (nalType == 7 || nalType == 8) {
+            if (nalType == 7) atomic_fetch_add(&g_spsCount, 1);
+            else atomic_fetch_add(&g_ppsCount, 1);
+
             static NSMutableData *sps, *pps;
             static dispatch_once_t once;
             dispatch_once(&once, ^{ sps = [NSMutableData data]; pps = [NSMutableData data]; });
-            if (nalType == 7) [sps setData:nal];
-            else if (nalType == 8) [pps setData:nal];
+            if (nalType == 7) [sps setData:msg];
+            else [pps setData:msg];
+
             if (sps.length && pps.length) {
+                // SPS/PPS neu -> alte Session/FormatDescription invalidieren
+                if (g_vtSession) { VTDecompressionSessionInvalidate(g_vtSession); CFRelease(g_vtSession); g_vtSession = NULL; }
+                if (g_fmtDesc) { CFRelease(g_fmtDesc); g_fmtDesc = NULL; }
+
                 const uint8_t *ptrs[2] = { (const uint8_t *)sps.bytes, (const uint8_t *)pps.bytes };
                 size_t sizes[2] = { sps.length, pps.length };
                 OSStatus st = CMVideoFormatDescriptionCreateFromH264ParameterSets(
@@ -162,7 +166,10 @@ static void pumpDecoder(void) {
             return;
         }
 
-        // --- VT-Session einmalig anlegen ---
+        // Komplette AU (AVCC: [4-byte len][NAL]...). NAL-Typ aus erster NAL nach Längenpräfix.
+        if (g_fmtDesc == NULL) return;   // ohne SPS/PPS keine Decode möglich
+
+        // --- VT-Session anlegen ---
         if (g_vtSession == NULL) {
             atomic_fetch_add(&g_vtSessionAttempts, 1);
             VTDecompressionOutputCallbackRecord cb;
@@ -176,31 +183,37 @@ static void pumpDecoder(void) {
                 (__bridge CFDictionaryRef)attrs, &cb, &g_vtSession);
             if (st != noErr || !g_vtSession) {
                 atomic_store(&g_vtSessionError, st);
-                L("VT-Session FAIL: %d (attempt %llu)", (int)st,
-                  (unsigned long long)atomic_load(&g_vtSessionAttempts));
+                L("VT-Session FAIL: %d", (int)st);
                 return;
             }
             L("Decode-Session OK");
         }
 
-        // --- AVCC-Block bauen: [4-Byte-Länge][NAL] (KEIN Annex-B-Startcode!) ---
-        uint32_t nalLen = htonl((uint32_t)nal.length);
-        size_t blockLen = 4 + (size_t)nal.length;
-        uint8_t *blockBuf = malloc(blockLen);
+        // AU ist bereits AVCC-formatiert -> direkt als BlockBuffer
+        size_t auLen = (size_t)msg.length;
+        uint8_t *blockBuf = malloc(auLen);
         if (!blockBuf) return;
-        memcpy(blockBuf, &nalLen, 4);
-        memcpy(blockBuf + 4, nal.bytes, nal.length);
+        memcpy(blockBuf, msg.bytes, auLen);
 
         CMBlockBufferRef bb = NULL;
-        OSStatus bbSt = CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault, blockBuf, blockLen,
-            kCFAllocatorDefault, NULL, 0, blockLen, 0, &bb);
+        OSStatus bbSt = CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault, blockBuf, auLen,
+            kCFAllocatorDefault, NULL, 0, auLen, 0, &bb);
         if (bbSt != kCMBlockBufferNoErr || !bb) {
             L("BlockBuffer FAIL: %d", (int)bbSt);
             free(blockBuf);
             return;
         }
+
+        // Samplegröße explizit angeben (Astras Korrektur)
+        CMSampleTimingInfo timing = {
+            .duration = CMTimeMake(1, 30),
+            .presentationTimeStamp = CMTimeMake((int64_t)atomic_load(&g_decodeSubmitCount), 30),
+            .decodeTimeStamp = kCMTimeInvalid,
+        };
+        size_t sampleSize = auLen;
         CMSampleBufferRef sb = NULL;
-        OSStatus sbSt = CMSampleBufferCreate(kCFAllocatorDefault, bb, true, NULL, NULL, g_fmtDesc, 1, 0, NULL, 0, NULL, &sb);
+        OSStatus sbSt = CMSampleBufferCreate(kCFAllocatorDefault, bb, true, NULL, NULL, g_fmtDesc,
+            1, 1, &timing, 1, &sampleSize, &sb);
         CFRelease(bb);
         if (sbSt != noErr || !sb) {
             L("SampleBuffer FAIL: %d", (int)sbSt);
