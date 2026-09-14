@@ -130,11 +130,23 @@ static NSString *wsAcceptKey(NSString *key) {
     return [[NSData dataWithBytes:digest length:CC_SHA1_DIGEST_LENGTH] base64EncodedStringWithOptions:0];
 }
 
+static ssize_t hubRecvHeaders(int fd, char *buf, size_t cap) {
+    size_t used = 0;
+    while (used + 1 < cap) {
+        ssize_t n = recv(fd, buf + used, cap - used - 1, 0);
+        if (n <= 0) return n;
+        used += (size_t)n;
+        buf[used] = 0;
+        if (strstr(buf, "\r\n\r\n")) return (ssize_t)used;
+    }
+    return -1;
+}
+
 static void *hubClientThread(void *arg) {
     int fd = (int)(intptr_t)arg;
     @autoreleasepool {
         uint8_t *buf = malloc(MAX_PENDING);
-        ssize_t n = recv(fd, buf, MAX_PENDING - 1, 0);
+        ssize_t n = hubRecvHeaders(fd, (char *)buf, MAX_PENDING);
         if (n > 0) {
             buf[n] = 0;
             NSString *req = [NSString stringWithUTF8String:(const char *)buf];
