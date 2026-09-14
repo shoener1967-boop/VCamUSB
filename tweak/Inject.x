@@ -215,14 +215,64 @@ static _Atomic int64_t g_passthroughCreated = 0;
 static _Atomic int64_t g_passthroughFailures = 0;
 static _Atomic int64_t g_passthroughOrig = 0;
 
+// ---------------------------------------------------------------- Testmuster
+// Wenn /tmp/vcam_testpattern existiert, wird statt des Decoder-Frames ein
+// konstantes 1440x1080-420f-Graubild (Y=100, Cb=128, Cr=128) eingespeist.
+// Das isoliert den Handoff-Pfad vom Decoder/Bitstream.
+static CVPixelBufferRef g_testPattern = NULL;
+static _Atomic int64_t g_testPatternUsed = 0;
+
+static CVPixelBufferRef makeTestPattern(void) {
+    NSDictionary *attrs = @{
+        (__bridge id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange),
+        (__bridge id)kCVPixelBufferWidthKey: @(1440),
+        (__bridge id)kCVPixelBufferHeightKey: @(1080),
+        (__bridge id)kCVPixelBufferIOSurfacePropertiesKey: @{},
+    };
+    CVPixelBufferRef pb = NULL;
+    CVPixelBufferCreate(kCFAllocatorDefault, 1440, 1080,
+        kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+        (__bridge CFDictionaryRef)attrs, &pb);
+    if (!pb) return NULL;
+
+    CVPixelBufferLockBaseAddress(pb, 0);
+    uint8_t *y = CVPixelBufferGetBaseAddressOfPlane(pb, 0);
+    uint8_t *uv = CVPixelBufferGetBaseAddressOfPlane(pb, 1);
+    size_t yS = CVPixelBufferGetBytesPerRowOfPlane(pb, 0);
+    size_t uvS = CVPixelBufferGetBytesPerRowOfPlane(pb, 1);
+    size_t w = CVPixelBufferGetWidth(pb);
+    size_t h = CVPixelBufferGetHeight(pb);
+
+    for (size_t r = 0; r < h; r++) memset(y + r * yS, 100, w);
+    // Cb=128, Cr=128 interleaved
+    for (size_t r = 0; r < h / 2; r++) {
+        uint8_t *row = uv + r * uvS;
+        for (size_t x = 0; x < w; x += 2) {
+            row[x] = 128;      // Cb
+            row[x + 1] = 128;  // Cr
+        }
+    }
+    CVPixelBufferUnlockBaseAddress(pb, 0);
+    return pb;
+}
+
 static CMSampleBufferRef buildSwapSampleBuffer(CMSampleBufferRef original) {
     atomic_fetch_add(&g_passthroughAttempts, 1);
 
-    // Decoder-Buffer sicher holen (Retain unter Lock)
+    // Testmuster-Modus?
+    BOOL testMode = (access("/tmp/vcam_testpattern", F_OK) == 0);
+
     CVPixelBufferRef px = NULL;
-    [g_frameLock lock];
-    if (g_latestFrame) px = CVPixelBufferRetain(g_latestFrame);
-    [g_frameLock unlock];
+    if (testMode) {
+        if (!g_testPattern) g_testPattern = makeTestPattern();
+        if (g_testPattern) px = CVPixelBufferRetain(g_testPattern);
+        atomic_fetch_add(&g_testPatternUsed, 1);
+    } else {
+        // Decoder-Buffer sicher holen (Retain unter Lock)
+        [g_frameLock lock];
+        if (g_latestFrame) px = CVPixelBufferRetain(g_latestFrame);
+        [g_frameLock unlock];
+    }
     if (!px) {
         atomic_fetch_add(&g_passthroughOrig, 1);
         return NULL;
