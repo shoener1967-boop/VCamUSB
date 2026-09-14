@@ -50,6 +50,7 @@ static _Atomic uint64_t g_emitCalls = 0;
 static _Atomic uint64_t g_sendCalls = 0;
 static _Atomic uint64_t g_buildCalls = 0;
 static _Atomic uint64_t g_swapCount = 0;
+static _Atomic uint64_t g_swapSizeMismatch = 0;
 static _Atomic uint64_t g_origCount = 0;
 static _Atomic uint64_t g_hasLatestFrame = 0;
 static _Atomic uint64_t g_vtSessionAttempts = 0;
@@ -332,6 +333,24 @@ static CMSampleBufferRef buildSwapSampleBuffer(CMSampleBufferRef original) {
         return NULL;
     }
 
+    // SICHERHEITS-CHECK: Größe + Pixelformat müssen zum Original passen,
+    // sonst crasht die App (TikTok/WebRTC verwerfen oder brechen bei Mismatch).
+    CVPixelBufferRef origPB = original ? CMSampleBufferGetImageBuffer(original) : NULL;
+    if (origPB) {
+        size_t ow = CVPixelBufferGetWidth(origPB);
+        size_t oh = CVPixelBufferGetHeight(origPB);
+        OSType ofmt = CVPixelBufferGetPixelFormatType(origPB);
+        size_t dw = CVPixelBufferGetWidth(px);
+        size_t dh = CVPixelBufferGetHeight(px);
+        OSType dfmt = CVPixelBufferGetPixelFormatType(px);
+        if (ow != dw || oh != dh || ofmt != dfmt) {
+            // Mismatch: NICHT ersetzen — Original durchlassen
+            CVPixelBufferRelease(px);
+            atomic_fetch_add(&g_swapSizeMismatch, 1);
+            return NULL;
+        }
+    }
+
     // Format-Description aus dem tatsächlichen Decoder-Buffer (nicht raten)
     CMFormatDescriptionRef fmt = NULL;
     OSStatus st = CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, px, &fmt);
@@ -564,7 +583,7 @@ static void statusServerThread(void) {
             "rxNal=%llu sps=%llu pps=%llu idr=%llu "
             "wsBin=%llu wsText=%llu wsBytes=%llu "
             "formatDesc=%llu submit=%llu output=%llu errors=%llu "
-            "emit=%llu send=%llu figEmitRep=%llu figSendRep=%llu build=%llu swap=%llu orig=%llu hasFrame=%llu "
+            "emit=%llu send=%llu figEmitRep=%llu figSendRep=%llu build=%llu swap=%llu swapMismatch=%llu orig=%llu hasFrame=%llu "
             "vtAttempts=%llu vtError=%lld\n",
             (unsigned long long)atomic_load(&g_rxNalCount),
             (unsigned long long)atomic_load(&g_spsCount),
@@ -583,6 +602,7 @@ static void statusServerThread(void) {
             (unsigned long long)atomic_load(&g_figSendReplacements),
             (unsigned long long)atomic_load(&g_buildCalls),
             (unsigned long long)atomic_load(&g_swapCount),
+            (unsigned long long)atomic_load(&g_swapSizeMismatch),
             (unsigned long long)atomic_load(&g_origCount),
             (unsigned long long)atomic_load(&g_hasLatestFrame),
             (unsigned long long)atomic_load(&g_vtSessionAttempts),
