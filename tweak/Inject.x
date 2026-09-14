@@ -24,6 +24,7 @@
 #import <arpa/inet.h>
 #import <stdatomic.h>
 #import <os/log.h>
+#import <pthread.h>
 
 #define WS_PORT 8767
 #define STATUS_PORT 8769
