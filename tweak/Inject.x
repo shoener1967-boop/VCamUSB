@@ -616,6 +616,10 @@ static void statusServerThread(void) {
             int mw = snprintf(msg + w, sizeof(msg) - w, "SINKS: %s\n", g_sinkClasses);
             if (mw > 0) w += mw;
         }
+        if (g_selectorDump[0]) {
+            int mw = snprintf(msg + w, sizeof(msg) - w, "SELOWNER:\n%s\n", g_selectorDump);
+            if (mw > 0) w += mw;
+        }
         {
             pthread_mutex_lock(&g_objMutex);
             int used = 0;
@@ -857,6 +861,46 @@ static void dumpCopyNextClasses(void) {
     L("copyNextSampleBuffer: %d Klassen (inkl. geerbt)", found);
 }
 
+// ---------------------------------------------------------------- LordVCAM-Selector-Besitzer finden
+static char g_selectorDump[8192];
+static void dumpSelectorOwners(void) {
+    const char *sels[] = {
+        "emitSampleBuffer:",
+        "sendMediaServerdSampleAtPoint:",
+        "setOriginalDelegate:",
+        "emitStillImageReferenceFrameBracketedCaptureSequenceNumberMessageWithSequenceNumber:",
+        "emitStillImagePrewarmMessageWithSettings:"
+    };
+    int nsels = sizeof(sels) / sizeof(sels[0]);
+    int count = objc_getClassList(NULL, 0);
+    Class *classes = (Class *)malloc(sizeof(Class) * count);
+    count = objc_getClassList(classes, count);
+    size_t off = 0;
+    g_selectorDump[0] = 0;
+
+    for (int s = 0; s < nsels; s++) {
+        SEL sel = sel_registerName(sels[s]);
+        off += snprintf(g_selectorDump + off, sizeof(g_selectorDump) - off,
+                        "[%s] -> ", sels[s]);
+        int found = 0;
+        for (int i = 0; i < count && off < sizeof(g_selectorDump) - 400; i++) {
+            Class cls = classes[i];
+            Method m = class_getInstanceMethod(cls, sel);
+            if (m) {
+                Class impl = ClassThatImplementsSelector(cls, sel);
+                int w = snprintf(g_selectorDump + off, sizeof(g_selectorDump) - off,
+                    "%s; ", impl ? class_getName(impl) : class_getName(cls));
+                if (w > 0) off += w;
+                found++;
+            }
+        }
+        if (!found) off += snprintf(g_selectorDump + off, sizeof(g_selectorDump) - off, "(keine)");
+        off += snprintf(g_selectorDump + off, sizeof(g_selectorDump) - off, "\n");
+    }
+    free(classes);
+    L("Selector-Besitzer-Diagnose fertig");
+}
+
 // ---------------------------------------------------------------- Foto/Video-Klassen finden
 static void dumpWildcardClasses(void) {
     // In lokalen Puffer bauen, am Ende atomar in g_sinkClasses kopieren (kein Race).
@@ -918,9 +962,10 @@ static void dumpWildcardClasses(void) {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
         while (1) {
             logMethodsOfClass(NSClassFromString(@"BWNodeOutput"), "BWNodeOutput", g_methodDump);
-            logMethodsOfClass(NSClassFromString(@"FigCaptureClientSessionMonitor"), "FigCaptureClientSessionMonitor", g_methodDump2);
+            logMethodsOfClass(NSClassFromString(@"FigCaptureClientSessionMonitor"), @"FigCaptureClientSessionMonitor", g_methodDump2);
             dumpWildcardClasses();
             dumpCopyNextClasses();
+            dumpSelectorOwners();
             sleep(5);
         }
     });
