@@ -874,6 +874,7 @@ static void wsClientThread(void) {
             addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
             addr.sin_port = htons(WS_PORT);
             if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+                L("connect zum Hub fehlgeschlagen: %s", strerror(errno));
                 close(fd);
                 sleep(2);
                 continue;
