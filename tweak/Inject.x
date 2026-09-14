@@ -325,13 +325,30 @@ static void scaleNV12Plane(const uint8_t *sp, size_t srcStride, size_t srcW, siz
                            uint8_t *dp, size_t dstStride, size_t dstW, size_t dstH,
                            size_t cropX, size_t cropY, size_t cropW, size_t cropH) {
     for (size_t y = 0; y < dstH; y++) {
-        // Zielzeile y -> Quellzeile (mit Center-Crop-Offset + lineare Interpolation)
         size_t sy = cropY + (y * cropH) / dstH;
         const uint8_t *srcRow = sp + sy * srcStride + cropX;
         uint8_t *dstRow = dp + y * dstStride;
         for (size_t x = 0; x < dstW; x++) {
             size_t sx = cropX + (x * cropW) / dstW;
             dstRow[x] = srcRow[sx];
+        }
+    }
+}
+
+// UV-Plane in NV12 ist interleaved CbCr: 2 Bytes pro Pixel. Nicht byteweise skalieren!
+static void scaleNV12UVPlane(const uint8_t *sp, size_t srcStride, size_t srcW, size_t srcH,
+                             uint8_t *dp, size_t dstStride, size_t dstW, size_t dstH,
+                             size_t cropX, size_t cropY, size_t cropW, size_t cropH) {
+    for (size_t y = 0; y < dstH; y++) {
+        size_t sy = cropY + (y * cropH) / dstH;
+        const uint8_t *srcRow = sp + sy * srcStride;
+        uint8_t *dstRow = dp + y * dstStride;
+        for (size_t x = 0; x < dstW; x++) {
+            size_t sx = cropX + (x * cropW) / dstW;
+            size_t srcOff = sx * 2;
+            size_t dstOff = x * 2;
+            dstRow[dstOff] = srcRow[srcOff];         // Cb
+            dstRow[dstOff + 1] = srcRow[srcOff + 1]; // Cr
         }
     }
 }
