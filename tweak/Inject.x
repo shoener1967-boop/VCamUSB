@@ -443,53 +443,36 @@ static _Atomic int64_t g_origPixelFormat = 0;
 static _Atomic int64_t g_origWidth = 0;
 static _Atomic int64_t g_origHeight = 0;
 
-// Objekt-Instanz-Tracking: erkennt getrennte Output-Instanzen (Preview vs Recording vs WebRTC)
-static _Atomic uint64_t g_distinctObjects = 0;
-static char g_objectList[4096] = {0};
+// Objekt-Instanz-Tracking: struct-Array statt String (kein memmove-Bug)
+typedef struct {
+    uintptr_t object;
+    uint64_t calls;
+    char className[96];
+} OutputEntry;
+
+static OutputEntry g_outputs[32] = {0};
 static pthread_mutex_t g_objMutex = PTHREAD_MUTEX_INITIALIZER;
 
 static void trackObject(id self) {
+    uintptr_t object = (uintptr_t)self;
     pthread_mutex_lock(&g_objMutex);
-    // Nur EINDEUTIGE Objekte mit Zähler führen: "0xADDR:class:N;"
-    const char *cls = object_getClassName(self);
-    char entry[128];
-    snprintf(entry, sizeof(entry), "0x%016lx:%s:", (unsigned long)(uintptr_t)self, cls);
-    // existiert dieser Eintrag schon?
-    char *found = strstr(g_objectList, entry);
-    if (found) {
-        // Zähler nach ":" erhöhen (direkt hinter dem Namen)
-        char *cnt = strchr(found + strlen(entry), ';');
-        // wir speichern format "ADDR:class:N;" — N suchen
-        char *nStart = found + strlen(entry);
-        char *semi = strchr(nStart, ';');
-        if (semi) {
-            int n = atoi(nStart);
-            // überschreiben: nStart zeigt auf Anfang der Zahl
-            char num[32];
-            snprintf(num, sizeof(num), "%d", n + 1);
-            size_t numlen = strlen(num);
-            // verschieben? Nein — einfach Format ändern: wir speichern feste Breite
-            // einfach: wir rekonstruieren den Eintrag
-            char *semiNext = semi + 1;
-            // String ab semiNext nach links auf nStart+numlen verschieben
-            size_t tailLen = strlen(semiNext) + 1;
-            memmove(nStart + numlen, semiNext, tailLen);
-            memcpy(nStart, num, numlen);
+    for (size_t i = 0; i < 32; i++) {
+        if (g_outputs[i].object == object) {
+            g_outputs[i].calls++;
+            pthread_mutex_unlock(&g_objMutex);
+            return;
         }
-    } else {
-        // neuer Eintrag
-        size_t cur = strlen(g_objectList);
-        char newEntry[160];
-        snprintf(newEntry, sizeof(newEntry), "%s1;", entry);
-        if (cur + strlen(newEntry) < sizeof(g_objectList) - 1) {
-            strncat(g_objectList, newEntry, sizeof(g_objectList) - cur - 1);
-        } else {
-            g_objectList[0] = 0;
-            strncat(g_objectList, newEntry, sizeof(g_objectList) - 1);
+    }
+    for (size_t i = 0; i < 32; i++) {
+        if (g_outputs[i].object == 0) {
+            g_outputs[i].object = object;
+            g_outputs[i].calls = 1;
+            snprintf(g_outputs[i].className, sizeof(g_outputs[i].className), "%s",
+                     object_getClassName(self));
+            break;
         }
     }
     pthread_mutex_unlock(&g_objMutex);
-    atomic_fetch_add(&g_distinctObjects, 1);
 }
 
 %hook BWNodeOutput
@@ -606,9 +589,22 @@ static void statusServerThread(void) {
         }
         {
             pthread_mutex_lock(&g_objMutex);
-            int mw = snprintf(msg + w, sizeof(msg) - w, "OBJ: %s\n", g_objectList);
+            int used = 0;
+            for (int i = 0; i < 32; i++) {
+                if (g_outputs[i].object == 0) break;
+                used++;
+            }
+            for (int i = 0; i < used && w < (int)sizeof(msg) - 300; i++) {
+                int mw = snprintf(msg + w, sizeof(msg) - w, "OUT[%d]=0x%lx:%s:%llu; ",
+                    i, (unsigned long)g_outputs[i].object,
+                    g_outputs[i].className,
+                    (unsigned long long)g_outputs[i].calls);
+                if (mw > 0) w += mw;
+            }
             pthread_mutex_unlock(&g_objMutex);
-            if (mw > 0) w += mw;
+            if (w > 0) {
+                msg[w++] = '\n';
+            }
         }
         if (atomic_load(&g_handoffDumped)) {
             int mw = snprintf(msg + w, sizeof(msg) - w,
