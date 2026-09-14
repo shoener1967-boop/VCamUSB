@@ -809,13 +809,15 @@ static void dumpWildcardClasses(void) {
     L("injiziert in %@ (pid=%d)", proc, getpid());
     if (![proc isEqualToString:@"mediaserverd"]) return;
 
-    // Methoden-Diagnose (einmalig nach kurzem Delay, damit Klassen geladen sind)
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        logMethodsOfClass(NSClassFromString(@"BWNodeOutput"), "BWNodeOutput", g_methodDump);
-        logMethodsOfClass(NSClassFromString(@"FigCaptureClientSessionMonitor"), "FigCaptureClientSessionMonitor", g_methodDump2);
-        dumpWildcardClasses();
-        dumpCopyNextClasses();
+    // Diagnose periodisch alle 5s (erfasst Klassen auch NACH dem Kamera-Start)
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
+        while (1) {
+            logMethodsOfClass(NSClassFromString(@"BWNodeOutput"), "BWNodeOutput", g_methodDump);
+            logMethodsOfClass(NSClassFromString(@"FigCaptureClientSessionMonitor"), "FigCaptureClientSessionMonitor", g_methodDump2);
+            dumpWildcardClasses();
+            dumpCopyNextClasses();
+            sleep(5);
+        }
     });
 
     g_nalQueue = [NSMutableArray array];
