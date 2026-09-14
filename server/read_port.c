@@ -21,10 +21,16 @@ int main(int argc, char **argv) {
         close(fd);
         return 1;
     }
-    char buf[512];
-    ssize_t n = recv(fd, buf, sizeof(buf) - 1, 0);
-    if (n > 0) {
-        buf[n] = 0;
+    char buf[16384];
+    ssize_t total = 0;
+    ssize_t n;
+    while (total < (ssize_t)sizeof(buf) - 1) {
+        n = recv(fd, buf + total, sizeof(buf) - 1 - total, 0);
+        if (n <= 0) break;
+        total += n;
+    }
+    if (total > 0) {
+        buf[total] = 0;
         printf("%s", buf);
     }
     close(fd);
