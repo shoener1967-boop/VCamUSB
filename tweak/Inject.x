@@ -309,12 +309,32 @@ static CVPixelBufferRef makeTestPattern(void) {
 // Kopiert die Pixel von g_latestFrame in den ORIGINALEN CVPixelBuffer und lässt
 // den original CMSampleBuffer (Timing/Attachments/Pool) komplett unangetastet.
 // Das vermeidet den Crash, den ein NEUER SampleBuffer bei TikTok/WebRTC auslöst.
+#import <Accelerate/Accelerate.h>
+
 static _Atomic uint64_t g_inplaceSwap = 0;
 static _Atomic uint64_t g_inplaceMismatch = 0;
 static _Atomic uint64_t g_inplaceLockFail = 0;
+static _Atomic uint64_t g_inplaceScaled = 0;
 static _Atomic int64_t g_misDstFmt = 0, g_misDstW = 0, g_misDstH = 0;
 static _Atomic int64_t g_misSrcFmt = 0, g_misSrcW = 0, g_misSrcH = 0;
 static _Atomic int64_t g_fmtDumped = 0;
+
+// NV12 biplanar: Y-Plane + interleaved UV-Plane skalieren (Center-Crop).
+// srcW/srcH = Quellgröße, dstW/dstH = Zielgröße. Stride-aware Zeilen-Kopie.
+static void scaleNV12Plane(const uint8_t *sp, size_t srcStride, size_t srcW, size_t srcH,
+                           uint8_t *dp, size_t dstStride, size_t dstW, size_t dstH,
+                           size_t cropX, size_t cropY, size_t cropW, size_t cropH) {
+    for (size_t y = 0; y < dstH; y++) {
+        // Zielzeile y -> Quellzeile (mit Center-Crop-Offset + lineare Interpolation)
+        size_t sy = cropY + (y * cropH) / dstH;
+        const uint8_t *srcRow = sp + sy * srcStride + cropX;
+        uint8_t *dstRow = dp + y * dstStride;
+        for (size_t x = 0; x < dstW; x++) {
+            size_t sx = cropX + (x * cropW) / dstW;
+            dstRow[x] = srcRow[sx];
+        }
+    }
+}
 
 static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
     if (!original) return NO;
@@ -335,7 +355,7 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
     size_t sh = CVPixelBufferGetHeight(src);
     OSType sfmt = CVPixelBufferGetPixelFormatType(src);
 
-    // Einmalig das erste Mismatch-Format festhalten (Diagnose: Kamera-App vs TikTok)
+    // Einmalig das erste Mismatch-Format festhalten (Diagnose)
     if (!atomic_load(&g_fmtDumped) && (dw != sw || dh != sh || dfmt != sfmt)) {
         atomic_store(&g_fmtDumped, 1);
         atomic_store(&g_misDstFmt, (int64_t)dfmt);
@@ -344,18 +364,73 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
         atomic_store(&g_misSrcFmt, (int64_t)sfmt);
         atomic_store(&g_misSrcW, (int64_t)sw);
         atomic_store(&g_misSrcH, (int64_t)sh);
-        L("INPLACE-MISMATCH dst=%c%c%c%c %zux%zu src=%c%c%c%c %zux%zu",
-          (int)(dfmt>>24)&0xff, (int)(dfmt>>16)&0xff, (int)(dfmt>>8)&0xff, (int)dfmt&0xff, dw, dh,
-          (int)(sfmt>>24)&0xff, (int)(sfmt>>16)&0xff, (int)(sfmt>>8)&0xff, (int)sfmt&0xff, sw, sh);
     }
 
-    if (dw == sw && dh == sh && dfmt == sfmt) {
+    // Nur NV12/420f biplanar unterstützen wir aktuell
+    BOOL isNV12 = (dfmt == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+                || dfmt == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
+    if (isNV12 && dfmt == sfmt) {
         CVPixelBufferLockBaseAddress(dst, 0);
         CVPixelBufferLockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
 
+        if (dw == sw && dh == sh) {
+            // Same-size: stride-aware direkte Kopie (beide Planes)
+            for (size_t p = 0; p < 2; p++) {
+                const uint8_t *sp = CVPixelBufferGetBaseAddressOfPlane(src, p);
+                uint8_t *dp = CVPixelBufferGetBaseAddressOfPlane(dst, p);
+                if (!sp || !dp) continue;
+                size_t sb = CVPixelBufferGetBytesPerRowOfPlane(src, p);
+                size_t db = CVPixelBufferGetBytesPerRowOfPlane(dst, p);
+                size_t ph = CVPixelBufferGetHeightOfPlane(dst, p);
+                size_t copy = db < sb ? db : sb;
+                for (size_t y = 0; y < ph; y++) {
+                    memcpy(dp + y * db, sp + y * sb, copy);
+                }
+            }
+            ok = YES;
+        } else {
+            // Größen-Mismatch: Center-Crop + Skalierung pro Plane
+            // Seitenverhältnis erhalten: den größeren Quellausschnitt wählen
+            double srcAR = (double)sw / (double)sh;
+            double dstAR = (double)dw / (double)dh;
+            size_t cropW, cropH, cropX, cropY;
+            if (srcAR > dstAR) {
+                // Quelle breiter -> horizontal croppen
+                cropH = sh;
+                cropW = (size_t)(sh * dstAR);
+                cropX = (sw - cropW) / 2;
+                cropY = 0;
+            } else {
+                // Quelle höher -> vertikal croppen
+                cropW = sw;
+                cropH = (size_t)(sw / dstAR);
+                cropX = 0;
+                cropY = (sh - cropH) / 2;
+            }
+            // Y-Plane (volle Auflösung)
+            scaleNV12Plane(CVPixelBufferGetBaseAddressOfPlane(src, 0),
+                           CVPixelBufferGetBytesPerRowOfPlane(src, 0), sw, sh,
+                           CVPixelBufferGetBaseAddressOfPlane(dst, 0),
+                           CVPixelBufferGetBytesPerRowOfPlane(dst, 0), dw, dh,
+                           cropX, cropY, cropW, cropH);
+            // UV-Plane (halbe Auflösung)
+            scaleNV12Plane(CVPixelBufferGetBaseAddressOfPlane(src, 1),
+                           CVPixelBufferGetBytesPerRowOfPlane(src, 1), sw / 2, sh / 2,
+                           CVPixelBufferGetBaseAddressOfPlane(dst, 1),
+                           CVPixelBufferGetBytesPerRowOfPlane(dst, 1), dw / 2, dh / 2,
+                           cropX / 2, cropY / 2, cropW / 2, cropH / 2);
+            ok = YES;
+            atomic_fetch_add(&g_inplaceScaled, 1);
+        }
+
+        CVPixelBufferUnlockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
+        CVPixelBufferUnlockBaseAddress(dst, 0);
+    } else if (dfmt == sfmt && dw == sw && dh == sh) {
+        // Fallback: Nicht-NV12, aber gleiche Größe/Format -> reine Byte-Kopie
+        CVPixelBufferLockBaseAddress(dst, 0);
+        CVPixelBufferLockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
         size_t planes = CVPixelBufferGetPlaneCount(dst);
         if (planes == 0) {
-            // single-plane (z.B. BGRA)
             void *dp = CVPixelBufferGetBaseAddress(dst);
             const void *sp = CVPixelBufferGetBaseAddress(src);
             size_t db = CVPixelBufferGetBytesPerRow(dst);
@@ -366,22 +441,7 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
                 memcpy((uint8_t *)dp + y * db, (const uint8_t *)sp + y * sb, copy);
             }
             ok = YES;
-        } else {
-            for (size_t p = 0; p < planes; p++) {
-                void *dp = CVPixelBufferGetBaseAddressOfPlane(dst, p);
-                const void *sp = CVPixelBufferGetBaseAddressOfPlane(src, p);
-                if (!dp || !sp) continue;
-                size_t db = CVPixelBufferGetBytesPerRowOfPlane(dst, p);
-                size_t sb = CVPixelBufferGetBytesPerRowOfPlane(src, p);
-                size_t h = CVPixelBufferGetHeightOfPlane(dst, p);
-                size_t copy = db < sb ? db : sb;
-                for (size_t y = 0; y < h; y++) {
-                    memcpy((uint8_t *)dp + y * db, (const uint8_t *)sp + y * sb, copy);
-                }
-            }
-            ok = YES;
         }
-
         CVPixelBufferUnlockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
         CVPixelBufferUnlockBaseAddress(dst, 0);
     }
@@ -666,7 +726,7 @@ static void statusServerThread(void) {
             "rxNal=%llu sps=%llu pps=%llu idr=%llu "
             "wsBin=%llu wsText=%llu wsBytes=%llu "
             "formatDesc=%llu submit=%llu output=%llu errors=%llu "
-            "emit=%llu send=%llu figEmitRep=%llu figSendRep=%llu build=%llu swap=%llu swapMismatch=%llu inplace=%llu inplaceMis=%llu orig=%llu hasFrame=%llu "
+            "emit=%llu send=%llu figEmitRep=%llu figSendRep=%llu build=%llu swap=%llu swapMismatch=%llu inplace=%llu inplaceMis=%llu inplaceScale=%llu orig=%llu hasFrame=%llu "
             "vtAttempts=%llu vtError=%lld\n",
             (unsigned long long)atomic_load(&g_rxNalCount),
             (unsigned long long)atomic_load(&g_spsCount),
@@ -688,6 +748,7 @@ static void statusServerThread(void) {
             (unsigned long long)atomic_load(&g_swapSizeMismatch),
             (unsigned long long)atomic_load(&g_inplaceSwap),
             (unsigned long long)atomic_load(&g_inplaceMismatch),
+            (unsigned long long)atomic_load(&g_inplaceScaled),
             (unsigned long long)atomic_load(&g_origCount),
             (unsigned long long)atomic_load(&g_hasLatestFrame),
             (unsigned long long)atomic_load(&g_vtSessionAttempts),

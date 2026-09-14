@@ -15,7 +15,7 @@ VCamHub_FRAMEWORKS := UIKit
 # ---- Inject: Substrate (%hook) + Video-Decoder
 VCamInject_FILES := Inject.x
 VCamInject_CFLAGS := -fobjc-arc -Wno-unused-variable
-VCamInject_FRAMEWORKS := CydiaSubstrate CoreVideo CoreMedia VideoToolbox
+VCamInject_FRAMEWORKS := CydiaSubstrate CoreVideo CoreMedia VideoToolbox Accelerate
 
 # ---- AVF: App-seitiger AVFoundation-Diagnose-Hook (Dritt-Apps)
 VCamAVF_FILES := AVF.x
