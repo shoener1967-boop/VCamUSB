@@ -408,43 +408,6 @@ static void scaleNV12UVPlane(const uint8_t *sp, size_t srcStride, size_t srcW, s
     }
 }
 
-// 90°-Rotations-Scale für Orientierungswechsel (Landscape-Quelle -> Portrait-Ziel).
-// dst(x,y) = src(sx,sy) mit rotierter Abbildung — KEIN Temp-Buffer nötig.
-//   ry = y * srcW / dstH   (rotierte Höhe = srcW)
-//   rx = x * srcH / dstW   (rotierte Breite = srcH)
-//   sx = srcH - 1 - ry, sy = rx   (90°-Rotation)
-static void scaleNV12PlaneRot90(const uint8_t *sp, size_t srcStride, size_t srcW, size_t srcH,
-                                uint8_t *dp, size_t dstStride, size_t dstW, size_t dstH) {
-    if (!sp || !dp || !srcStride || !dstStride || !srcW || !srcH || !dstW || !dstH) return;
-    for (size_t y = 0; y < dstH; y++) {
-        size_t ry = y * srcW / dstH;
-        size_t sx = srcH - 1 - ry;
-        const uint8_t *srcRow = sp + sx * srcStride;
-        uint8_t *dstRow = dp + y * dstStride;
-        for (size_t x = 0; x < dstW; x++) {
-            size_t sy = x * srcH / dstW;
-            dstRow[x] = srcRow[sy];
-        }
-    }
-}
-
-// UV-Plane (interleaved CbCr, halbe Auflösung) — gleiche Rotations-Abbildung.
-static void scaleNV12UVRot90(const uint8_t *sp, size_t srcStride, size_t srcW, size_t srcH,
-                             uint8_t *dp, size_t dstStride, size_t dstW, size_t dstH) {
-    if (!sp || !dp || !srcStride || !dstStride || !srcW || !srcH || !dstW || !dstH) return;
-    for (size_t y = 0; y < dstH; y++) {
-        size_t ry = y * srcW / dstH;
-        size_t sx = srcH - 1 - ry;
-        const uint8_t *srcRow = sp + sx * srcStride;
-        uint8_t *dstRow = dp + y * dstStride;
-        for (size_t x = 0; x < dstW; x++) {
-            size_t sy = x * srcH / dstW;
-            dstRow[x * 2] = srcRow[sy * 2];           // Cb
-            dstRow[x * 2 + 1] = srcRow[sy * 2 + 1];   // Cr
-        }
-    }
-}
-
 static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
     if (!original) return NO;
     CVPixelBufferRef dst = CMSampleBufferGetImageBuffer(original);
