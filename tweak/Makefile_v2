@@ -1,0 +1,22 @@
+TARGET := iphone:clang:16.5:16.0
+ARCHS = arm64 arm64e
+THEOS_DEVICE_IP = 127.0.0.1
+THEOS_DEVICE_PORT = 2222
+
+include $(THEOS)/makefiles/common.mk
+
+TWEAK_NAME = VCamInject_v2
+
+VCamInject_v2_FILES = Inject_v2.x
+VCamInject_v2_CFLAGS = -fobjc-arc -Wno-unused-variable -Wno-unused-function
+VCamInject_v2_FRAMEWORKS = Foundation CoreVideo CoreMedia VideoToolbox Accelerate IOSurface
+VCamInject_v2_LIBRARIES = substrate
+
+include $(THEOS_MAKE_PATH)/tweak.mk
+
+# GitHub Actions Build-ID injizieren
+export VCAM_BUILD_ID := $(shell date +%Y%m%d-%H%M%S)-$(shell git rev-parse --short HEAD 2>/dev/null || echo "local")
+
+after-stage::
+	$(ECHO_NOTHING)mkdir -p $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries$(ECHO_END)
+	$(ECHO_NOTHING)cp VCamInject.plist $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/VCamInject_v2.plist$(ECHO_END)
