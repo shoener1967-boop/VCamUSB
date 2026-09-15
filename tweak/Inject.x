@@ -416,6 +416,63 @@ static void scaleNV12UVPlane(const uint8_t *sp, size_t srcStride, size_t srcW, s
     }
 }
 
+// 90°-Rotations-Scale (CW und CCW) für Orientierungswechsel.
+// Quelle 1920x1080 (landscape) -> Ziel 750x1334 (portrait): rotieren + skalieren.
+// RotationDegrees=90: dst wird aus src per CW-Rotation gelesen.
+// conv: Range-Konvertierung (NULL = 1:1).
+// Geometry (Y-Plane, volle Auflösung):
+//   rotiert 90° CW: dst(x,y) = src(x_src, y_src) mit
+//     x_src = srcH - 1 - y_dst_scaled,  y_src = x_dst_scaled
+static void rotate90Plane(const uint8_t *sp, size_t srcStride, size_t srcW, size_t srcH,
+                          uint8_t *dp, size_t dstStride, size_t dstW, size_t dstH,
+                          BOOL cw, ConvFn conv) {
+    if (!sp || !dp || !srcStride || !dstStride || !srcW || !srcH || !dstW || !dstH) return;
+    // rotiert sind die Ziel-Dimensionen vertauscht: Ziel 750x1334 <- Quelle 1920x1080
+    // rotierte Quelle: Breite=srcH, Höhe=srcW
+    size_t rotW = srcH, rotH = srcW;
+    for (size_t y = 0; y < dstH; y++) {
+        size_t ry = y * rotH / dstH;      // Ziel-Zeile -> rotierte Quelle-Zeile
+        uint8_t *dstRow = dp + y * dstStride;
+        for (size_t x = 0; x < dstW; x++) {
+            size_t rx = x * rotW / dstW;  // Ziel-Spalte -> rotierte Quelle-Spalte
+            size_t sx, sy;
+            if (cw) {
+                // CW: rotiert(x=rx,y=ry) = src(x=srcH-1-ry, y=rx)
+                sx = srcH - 1 - ry;
+                sy = rx;
+            } else {
+                // CCW: rotiert(x=rx,y=ry) = src(x=ry, y=srcW-1-rx)
+                sx = ry;
+                sy = srcW - 1 - rx;
+            }
+            uint8_t v = sp[sy * srcStride + sx];
+            dstRow[x] = conv ? conv(v) : v;
+        }
+    }
+}
+
+// UV-Plane (interleaved, halbe Auflösung): gleiche Rotation.
+static void rotate90UVPlane(const uint8_t *sp, size_t srcStride, size_t srcW, size_t srcH,
+                            uint8_t *dp, size_t dstStride, size_t dstW, size_t dstH,
+                            BOOL cw, ConvFn conv) {
+    if (!sp || !dp || !srcStride || !dstStride || !srcW || !srcH || !dstW || !dstH) return;
+    size_t rotW = srcH, rotH = srcW;   // halbe Auflösung: srcW/srcH sind bereits die halben DIMS
+    for (size_t y = 0; y < dstH; y++) {
+        size_t ry = y * rotH / dstH;
+        uint8_t *dstRow = dp + y * dstStride;
+        for (size_t x = 0; x < dstW; x++) {
+            size_t rx = x * rotW / dstW;
+            size_t sx, sy;
+            if (cw) { sx = srcH - 1 - ry; sy = rx; }
+            else    { sx = ry; sy = srcW - 1 - rx; }
+            uint8_t cb = sp[sy * srcStride + sx * 2];
+            uint8_t cr = sp[sy * srcStride + sx * 2 + 1];
+            dstRow[x * 2] = conv ? conv(cb) : cb;
+            dstRow[x * 2 + 1] = conv ? conv(cr) : cr;
+        }
+    }
+}
+
 static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
     if (!original) return NO;
     CVPixelBufferRef dst = CMSampleBufferGetImageBuffer(original);
@@ -532,10 +589,47 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
             }
             ok = YES;
         } else {
-            // Größen-Mismatch: Center-Crop + Skalierung pro Plane.
-            // KEINE Rotation hier! mediaserverd/BWPixelTransferNode macht die
-            // 90°-Orientierung selbst über CVBuffer-Attachments. Wir liefern
-            // nur Pixel im Sensor-Koordinatensystem (landscape).
+            // Größen-Mismatch. Entscheidung anhand des Orientierungs-Attachments:
+            // trägt der Ziel-Buffer "RotationDegrees" != 0, müssen wir rotieren.
+            int rotDeg = 0;
+            {
+                CFDictionaryRef pbAtts = CVBufferGetAttachments(dst, kCVAttachmentMode_ShouldPropagate);
+                if (pbAtts) {
+                    NSNumber *rd = (__bridge NSNumber *)CFDictionaryGetValue(
+                        (CFDictionaryRef)pbAtts, (CFStringRef)@"RotationDegrees");
+                    if (rd) rotDeg = [rd intValue];
+                }
+            }
+            // Range-Konvertierung: Quelle Full-Range (420f) -> Ziel Video-Range?
+            BOOL srcFullRange = (sfmt == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange);
+            BOOL dstFullRange = (dfmt == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange);
+            ConvFn convY = NULL, convC = NULL;
+            if (srcFullRange && !dstFullRange) {
+                convY = fullToVideoY;
+                convC = fullToVideoC;
+            } else if (!srcFullRange && dstFullRange) {
+                convY = videoToFullY;
+                convC = videoToFullC;
+            }
+
+            if (rotDeg != 0) {
+                // Rotation (90° oder 270°). CW wenn 90, CCW wenn 270.
+                BOOL cw = (rotDeg == 90);
+                if (rotDeg != 90 && rotDeg != 270) cw = YES;
+                rotate90Plane(CVPixelBufferGetBaseAddressOfPlane(src, 0),
+                              CVPixelBufferGetBytesPerRowOfPlane(src, 0), sw, sh,
+                              CVPixelBufferGetBaseAddressOfPlane(dst, 0),
+                              CVPixelBufferGetBytesPerRowOfPlane(dst, 0), dw, dh,
+                              cw, convY);
+                rotate90UVPlane(CVPixelBufferGetBaseAddressOfPlane(src, 1),
+                                CVPixelBufferGetBytesPerRowOfPlane(src, 1), sw / 2, sh / 2,
+                                CVPixelBufferGetBaseAddressOfPlane(dst, 1),
+                                CVPixelBufferGetBytesPerRowOfPlane(dst, 1), dw / 2, dh / 2,
+                                cw, convC);
+                ok = YES;
+                atomic_fetch_add(&g_inplaceScaled, 1);
+            } else {
+            // KEINE Rotation (gleiche Orientierung): Center-Crop + Skalierung.
             double srcAR = (double)sw / (double)sh;
             double dstAR = (double)dw / (double)dh;
             size_t cropW, cropH, cropX, cropY;
@@ -557,17 +651,6 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
             cropY &= ~(size_t)1;
             cropW &= ~(size_t)1;
             cropH &= ~(size_t)1;
-            // Range-Konvertierung: Quelle Full-Range (420f) -> Ziel Video-Range?
-            BOOL srcFullRange = (sfmt == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange);
-            BOOL dstFullRange = (dfmt == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange);
-            ConvFn convY = NULL, convC = NULL;
-            if (srcFullRange && !dstFullRange) {
-                convY = fullToVideoY;
-                convC = fullToVideoC;
-            } else if (!srcFullRange && dstFullRange) {
-                convY = videoToFullY;
-                convC = videoToFullC;
-            }
             // Y-Plane (volle Auflösung)
             scaleNV12Plane(CVPixelBufferGetBaseAddressOfPlane(src, 0),
                            CVPixelBufferGetBytesPerRowOfPlane(src, 0), sw, sh,
@@ -582,6 +665,7 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
                            cropX / 2, cropY / 2, cropW / 2, cropH / 2, convC);
             ok = YES;
             atomic_fetch_add(&g_inplaceScaled, 1);
+            }   // Ende Center-Crop-Zweig
         }
 
         CVPixelBufferUnlockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
