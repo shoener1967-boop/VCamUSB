@@ -8,3 +8,4 @@ __pycache__/
 tools/
 dev_*.dylib
 *.sig
+tweak/packages/*.deb
