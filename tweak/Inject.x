@@ -948,13 +948,13 @@ static void statusServerThread(void) {
             " SINK iq=%llu iqFmt=%lldx%lld fmt=0x%08llx surf=%lld | qt=%llu qtFmt=%lldx%lld fmt=0x%08llx surf=%lld | st=%llu stFmt=%lldx%lld fmt=0x%08llx surf=%lld\n",
             (unsigned long long)atomic_load(&g_iqCalls),
             (long long)atomic_load(&g_iqWidth), (long long)atomic_load(&g_iqHeight),
-            (unsigned)(long long)atomic_load(&g_iqFmt), (long long)atomic_load(&g_iqSurf),
+            (unsigned long long)atomic_load(&g_iqFmt), (long long)atomic_load(&g_iqSurf),
             (unsigned long long)atomic_load(&g_qtCalls),
             (long long)atomic_load(&g_qtWidth), (long long)atomic_load(&g_qtHeight),
-            (unsigned)(long long)atomic_load(&g_qtFmt), (long long)atomic_load(&g_qtSurf),
+            (unsigned long long)atomic_load(&g_qtFmt), (long long)atomic_load(&g_qtSurf),
             (unsigned long long)atomic_load(&g_stCalls),
             (long long)atomic_load(&g_stWidth), (long long)atomic_load(&g_stHeight),
-            (unsigned)(long long)atomic_load(&g_stFmt), (long long)atomic_load(&g_stSurf));
+            (unsigned long long)atomic_load(&g_stFmt), (long long)atomic_load(&g_stSurf));
         if (fw > 0) w += fw;
         if (atomic_load(&g_fmtDumped)) {
             int mw = snprintf(msg + w, sizeof(msg) - w, " MIS dst=0x%08x %lldx%lld src=0x%08x %lldx%lld\n",
