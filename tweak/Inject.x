@@ -88,6 +88,19 @@ static _Atomic uint64_t g_figSendReplacements = 0;
 // Steuerung über TCP-Status-Port 8769: "stage=N" (unabhängig von WS/Hub!)
 static _Atomic int g_stage = 0;
 
+// ---------------------------------------------------------------- Sink-Beobachtung (Astra: Video-/Recording-/Foto-Pfade)
+// Aus syslog_full.txt verifizierte echte Sink-Klassen in mediaserverd:
+//   BWImageQueueSinkNode           -> renderSampleBuffer:forInput:  (PREVIEW, "Did display first frame")
+//   BWQuickTimeMovieFileSinkNode   -> Recording-Pfad
+//   BWStillImageSampleBufferSinkNode -> Foto-Pfad
+static _Atomic uint64_t g_iqCalls = 0;
+static _Atomic uint64_t g_iqWithImage = 0;
+static _Atomic int64_t g_iqWidth = 0, g_iqHeight = 0, g_iqFmt = 0, g_iqSurf = 0;
+static _Atomic uint64_t g_qtCalls = 0;
+static _Atomic int64_t g_qtWidth = 0, g_qtHeight = 0, g_qtFmt = 0, g_qtSurf = 0;
+static _Atomic uint64_t g_stCalls = 0;
+static _Atomic int64_t g_stWidth = 0, g_stHeight = 0, g_stFmt = 0, g_stSurf = 0;
+
 // ---------------------------------------------------------------- Globals
 static NSMutableArray<NSData *> *g_nalQueue = nil;
 static NSLock *g_queueLock = nil;
@@ -1346,17 +1359,7 @@ static void dumpWildcardClasses(void) {
 }
 
 // ---------------------------------------------------------------- Sink-Beobachtung (Astra: Video-/Recording-/Foto-Pfade)
-// Aus syslog_full.txt verifizierte echte Sink-Klassen in mediaserverd:
-//   BWImageQueueSinkNode           -> renderSampleBuffer:forInput:  (PREVIEW, "Did display first frame")
-//   BWQuickTimeMovieFileSinkNode   -> Recording-Pfad
-//   BWStillImageSampleBufferSinkNode -> Foto-Pfad
-static _Atomic uint64_t g_iqCalls = 0;
-static _Atomic uint64_t g_iqWithImage = 0;
-static _Atomic int64_t g_iqWidth = 0, g_iqHeight = 0, g_iqFmt = 0, g_iqSurf = 0;
-static _Atomic uint64_t g_qtCalls = 0;
-static _Atomic int64_t g_qtWidth = 0, g_qtHeight = 0, g_qtFmt = 0, g_qtSurf = 0;
-static _Atomic uint64_t g_stCalls = 0;
-static _Atomic int64_t g_stWidth = 0, g_stHeight = 0, g_stFmt = 0, g_stSurf = 0;
+// Globals stehen oben bei der Telemetrie. Hier nur der Mess-Helper.
 
 static void measureSinkAtomic(_Atomic uint64_t *calls, _Atomic int64_t *w,
                               _Atomic int64_t *h, _Atomic int64_t *fmt,
