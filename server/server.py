@@ -588,30 +588,32 @@ class FramePusher:
                                     i += 4
                                     continue
                             i += 1
-                            if not positions:
-                                if len(buf) > 1_000_000:
-                                    buf = b""
-                                continue
-                            # Verarbeite alle vollständigen NALs (alle bis auf die letzte)
-                            # Die letzte könnte unvollständig sein -> im Puffer lassen
-                            last_start = positions[-1][0]
-                            complete = buf[:last_start]
-                            buf = buf[last_start:]   # Rest ab letztem Startcode behalten
-                            # NALs aus dem kompletten Teil extrahieren
-                            nals = parse_nals(complete)
-                            for nal in nals:
-                                t = nal_type(nal)
-                                if t == 7 or t == 8:
-                                    # SPS/PPS: eigene Message (roh)
-                                    await send_binary(ws, nal)
-                                    self.state["nal_sent"] += 1
-                                elif t == 9:
-                                    # AUD: aktuelle AU abschließen
-                                    await flush_au(ws)
-                                elif t == 1 or t == 5 or t == 6:
-                                    cur_au.append(nal)
-                            await asyncio.sleep(0.001)
+                        if not positions:
+                            if len(buf) > 1_000_000:
+                                buf = b""
+                            continue
+                        # Verarbeite alle vollständigen NALs (alle bis auf die letzte)
+                        # Die letzte könnte unvollständig sein -> im Puffer lassen
+                        last_start = positions[-1][0]
+                        complete = buf[:last_start]
+                        buf = buf[last_start:]   # Rest ab letztem Startcode behalten
+                        # NALs aus dem kompletten Teil extrahieren
+                        nals = parse_nals(complete)
+                        for nal in nals:
+                            t = nal_type(nal)
+                            if t == 7 or t == 8:
+                                # SPS/PPS: eigene Message (roh)
+                                await send_binary(ws, nal)
+                                self.state["nal_sent"] += 1
+                            elif t == 9:
+                                # AUD: aktuelle AU abschließen
+                                await flush_au(ws)
+                            elif t == 1 or t == 5 or t == 6:
+                                cur_au.append(nal)
+                        await asyncio.sleep(0.001)
             except Exception as e:
+                import traceback as _tb
+                log.error("pusher exception: %s\n%s", e, _tb.format_exc())
                 self.state["connected"] = False
                 if not self._closed:
                     log.warning("link down (%s), retrying in 2s", e)
