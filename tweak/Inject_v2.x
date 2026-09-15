@@ -627,10 +627,11 @@ static CMSampleBufferRef buildReplacementSampleBuffer(CMSampleBufferRef original
         if (newAtts && CFArrayGetCount(newAtts) > 0) {
             CFMutableDictionaryRef newAtts0 = (CFMutableDictionaryRef)CFArrayGetValueAtIndex(newAtts, 0);
             if (newAtts0) {
-                // Alle Keys vom Original kopieren
-                CFDictionaryApplyFunction(origAtts, ^(const void *key, const void *value, void *context) {
-                    CFDictionarySetValue((CFMutableDictionaryRef)context, key, value);
-                }, newAtts0);
+                // Alle Keys vom Original kopieren (NSDictionary-Brücke statt CFDictionaryApplyFunction)
+                NSDictionary *origDict = (__bridge NSDictionary *)origAtts;
+                for (id key in origDict) {
+                    CFDictionarySetValue(newAtts0, (__bridge const void *)key, (__bridge const void *)origDict[key]);
+                }
             }
         }
     }
