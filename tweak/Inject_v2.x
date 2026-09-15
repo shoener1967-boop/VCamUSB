@@ -904,3 +904,4 @@ static void wsClientThread(void) {
 
     L("bereit — enabled=%d", (int)atomic_load(&g_enabled));
 }
+}
