@@ -198,11 +198,26 @@ class SourceReader:
             self.close()
             self.paused = False
             if src_type == "cam":
-                self.cap = cv2.VideoCapture(int(payload), cv2.CAP_DSHOW)
-                if not self.cap.isOpened():
+                idx = int(payload)
+                # Robust: wenn der angeforderte Index nicht lesbar ist,
+                # alle Indizes 0..7 scannen und den ersten nutzbaren nehmen.
+                candidates = [idx] + [i for i in range(8) if i != idx]
+                opened = False
+                for i in candidates:
+                    cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+                    if not cap.isOpened():
+                        cap.release()
+                        continue
+                    ok, frame = cap.read()
+                    if ok and frame is not None:
+                        self.cap = cap
+                        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, WIDTH)
+                        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
+                        opened = True
+                        break
+                    cap.release()
+                if not opened:
                     raise RuntimeError(f"camera {payload} not openable")
-                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, WIDTH)
-                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
             else:
                 if re.search(r"\.(jpg|jpeg|png|bmp|webp|tiff|heic)$", payload, re.I):
                     self.image_frame = cv2.imread(payload)
@@ -259,28 +274,46 @@ class SourceReader:
 # ---------------------------------------------------------------- Encoder (rawvideo -> h264 pipe)
 class Encoder:
     def __init__(self, fps):
+        self.fps = fps
         self.pipe = os.path.join(os.environ.get("TEMP", "/tmp"), "vcam_out.h264")
+        self.fflog_path = os.path.join(os.environ.get("TEMP", "/tmp"), "vcam_ffmpeg.log")
+        self._start()
+
+    def _start(self):
         try:
             os.unlink(self.pipe)
         except OSError:
             pass
+        # ffmpeg stderr in Datei loggen (Diagnose!), Fenster unterdrücken
+        creationflags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
+        try:
+            self.fflog = open(self.fflog_path, "ab")
+        except OSError:
+            self.fflog = None
         self.proc = subprocess.Popen(
-            ["ffmpeg", "-hide_banner", "-loglevel", "error",
+            ["ffmpeg", "-hide_banner", "-loglevel", "warning",
              "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{WIDTH}x{HEIGHT}",
-             "-r", str(fps), "-i", "-",
+             "-r", str(self.fps), "-i", "-",
              "-an", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-             "-pix_fmt", "yuv420p", "-g", str(fps * 2), "-b:v", "3M",
+             "-pix_fmt", "yuv420p", "-g", str(self.fps * 2), "-b:v", "3M",
              "-x264-params", "aud=1:bframes=0:keyint=30:min-keyint=30:scenecut=0",
              "-color_range", "pc",
              "-f", "h264", "-flush_packets", "1", self.pipe],
-            stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            stdin=subprocess.PIPE,
+            stderr=self.fflog if self.fflog is not None else subprocess.DEVNULL,
+            creationflags=creationflags)
 
     def send(self, frame):
-        if self.proc.poll() is None:
-            try:
-                self.proc.stdin.write(frame.tobytes())
-            except Exception:
-                pass
+        # Selbstheilung: ist ffmpeg gestorben, sofort neu starten.
+        if self.proc.poll() is not None:
+            log.warning("ffmpeg gestorben (rc=%s) — Neustart", self.proc.returncode)
+            self._start()
+            return
+        try:
+            self.proc.stdin.write(frame.tobytes())
+        except Exception as e:
+            log.error("encoder write fehlgeschlagen: %s", e)
+            self._start()
 
     def close(self):
         try:
@@ -288,6 +321,15 @@ class Encoder:
         except Exception:
             pass
         self.proc.terminate()
+        try:
+            self.proc.wait(timeout=3)
+        except Exception:
+            self.proc.kill()
+        if self.fflog:
+            try:
+                self.fflog.close()
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------- Render thread
@@ -468,28 +510,62 @@ class FramePusher:
                             self.state["frames_sent"] += 1
                             return
 
-                    with open(self.pipe, "rb") as f:
-                        while not self._closed:
-                            chunk = f.read(64 * 1024)
-                            if not chunk:
+                    # Pipe-Leser mit Trunkierungs-Erkennung:
+                    # Bei ffmpeg-Neustart wird die Pipe neu erstellt (kleiner).
+                    # Wenn die Datei kleiner wird als unsere Leseposition,
+                    # neu öffnen (handle bleibt am Anfang).
+                    import os as _os
+                    import msvcrt as _msvcrt
+                    f = None
+                    read_pos = 0
+                    while not self._closed:
+                        # Datei-Handle aktuell halten (Reopen bei Trunkierung)
+                        try:
+                            cur_size = _os.path.getsize(self.pipe)
+                        except OSError:
+                            cur_size = -1
+                        if f is None or (cur_size >= 0 and read_pos > cur_size):
+                            if f is not None:
+                                try:
+                                    f.close()
+                                except Exception:
+                                    pass
+                            f = None
+                            read_pos = 0
+                        if f is None:
+                            try:
+                                f = open(self.pipe, "rb")
+                                _msvcrt.setmode(f.fileno(), _os.O_BINARY)
+                                f.seek(read_pos)
+                            except Exception:
+                                f = None
                                 await asyncio.sleep(0.05)
                                 continue
-                            buf += chunk
-                            # Startcode-Positionen finden
-                            positions = []
-                            i = 0
-                            n = len(buf)
-                            while i < n - 2:
-                                if buf[i] == 0 and buf[i+1] == 0:
-                                    if buf[i+2] == 1:
-                                        positions.append((i, 3))
-                                        i += 3
-                                        continue
-                                    elif i+3 < n and buf[i+2] == 0 and buf[i+3] == 1:
-                                        positions.append((i, 4))
-                                        i += 4
-                                        continue
-                                i += 1
+                        try:
+                            chunk = f.read(64 * 1024)
+                        except Exception:
+                            await asyncio.sleep(0.02)
+                            continue
+                        if not chunk:
+                            await asyncio.sleep(0.02)
+                            continue
+                        read_pos += len(chunk)
+                        buf += chunk
+                        # Startcode-Positionen finden
+                        positions = []
+                        i = 0
+                        n = len(buf)
+                        while i < n - 2:
+                            if buf[i] == 0 and buf[i+1] == 0:
+                                if buf[i+2] == 1:
+                                    positions.append((i, 3))
+                                    i += 3
+                                    continue
+                                elif i+3 < n and buf[i+2] == 0 and buf[i+3] == 1:
+                                    positions.append((i, 4))
+                                    i += 4
+                                    continue
+                            i += 1
                             if not positions:
                                 if len(buf) > 1_000_000:
                                     buf = b""
@@ -727,15 +803,19 @@ async def main():
     log.info("Dashboard: http://localhost:%d   (target ws://%s:%d)", DASHBOARD_PORT, a.ip, a.port)
     logbuf.add("debug", "VCamUSB server started")
 
-    # camera id: if initial source is cam with device name, map to index
+    # camera id: if initial source is cam with device name, map to index.
+    # Numerische IDs direkt übernehmen (kein Namens-Mapping).
     if state["want"] and state["want"][0] == "cam":
-        cams = list_cameras()
         name = state["want"][1]
-        idx = 0
-        for i, c in enumerate(cams):
-            if c.lower() in name.lower() or name.lower() in c.lower():
-                idx = i
-                break
+        if name.isdigit():
+            idx = int(name)
+        else:
+            cams = list_cameras()
+            idx = 0
+            for i, c in enumerate(cams):
+                if c.lower() in name.lower() or name.lower() in c.lower():
+                    idx = i
+                    break
         state["want"] = ("cam", str(idx))
         logbuf.add("debug", f"camera mapped to index {idx}")
 
