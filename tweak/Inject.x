@@ -444,7 +444,7 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
                 static _Atomic int64_t g_layoutDump = 0;
                 if (!atomic_load(&g_layoutDump)) {
                     atomic_store(&g_layoutDump, 1);
-                    L("LAYOUT-MISMATCH dst(planes=%zu Y=%zu/%zu UV=%zu/%zu stride=%zu/%zu) src(planes=%zu Y=%zu/%zu UV=%zu/%zu stride=%zu/%zu) fmt=0x%08x",
+                    L("LAYOUT-MISMATCH dst(planes=%zu Y=%zu/%zu UV=%zu/%zu) src(planes=%zu Y=%zu/%zu UV=%zu/%zu) fmt=0x%08x",
                       dstPlanes, dYH, CVPixelBufferGetBytesPerRowOfPlane(dst, 0),
                       dUVH, CVPixelBufferGetBytesPerRowOfPlane(dst, 1),
                       srcPlanes, sYH, CVPixelBufferGetBytesPerRowOfPlane(src, 0),
