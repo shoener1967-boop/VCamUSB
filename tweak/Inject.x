@@ -102,6 +102,11 @@ static _Atomic int64_t g_qtWidth = 0, g_qtHeight = 0, g_qtFmt = 0, g_qtSurf = 0;
 static _Atomic uint64_t g_stCalls = 0;
 static _Atomic int64_t g_stWidth = 0, g_stHeight = 0, g_stFmt = 0, g_stSurf = 0;
 
+// Orientierungs-/Attachment-Diagnose (Astra: am Original-SampleBuffer des
+// BWImageQueueSinkNode auslesen, um Rotation/Transform zu verstehen).
+static char g_orientDump[4096] = {0};
+static _Atomic int64_t g_orientDumped = 0;
+
 // ---------------------------------------------------------------- Globals
 static NSMutableArray<NSData *> *g_nalQueue = nil;
 static NSLock *g_queueLock = nil;
@@ -1058,6 +1063,10 @@ static void statusServerThread(void) {
             (long long)atomic_load(&g_stWidth), (long long)atomic_load(&g_stHeight),
             (unsigned long long)atomic_load(&g_stFmt), (long long)atomic_load(&g_stSurf));
         if (fw > 0) w += fw;
+        if (atomic_load(&g_orientDumped)) {
+            int mw = snprintf(msg + w, sizeof(msg) - w, " %s\n", g_orientDump);
+            if (mw > 0) w += mw;
+        }
         if (atomic_load(&g_fmtDumped)) {
             int mw = snprintf(msg + w, sizeof(msg) - w, " MIS dst=0x%08x %lldx%lld src=0x%08x %lldx%lld\n",
                 (unsigned)(long long)atomic_load(&g_misDstFmt),
@@ -1477,17 +1486,75 @@ static void measureSinkAtomic(_Atomic uint64_t *calls, _Atomic int64_t *w,
     atomic_store(surf, s ? (int64_t)IOSurfaceGetID(s) : -1);
 }
 
+// Von Astra gefordert: Orientierung/Transform-Attachments des ORIGINAL-
+// SampleBuffers auslesen. Einmalig dumpen (g_orientDumped-Guard).
+static void dumpOrientationAttachments(CMSampleBufferRef sb) {
+    if (!sb) return;
+    if (atomic_load(&g_orientDumped)) return;
+    atomic_store(&g_orientDumped, 1);
+
+    CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(sb, true);
+    CMFormatDescriptionRef fmt = CMSampleBufferGetFormatDescription(sb);
+    CVPixelBufferRef px = CMSampleBufferGetImageBuffer(sb);
+
+    size_t off = 0;
+    char *buf = g_orientDump;
+    off += snprintf(buf + off, sizeof(g_orientDump) - off,
+        "ORIENT sb=0x%lx w=%d h=%d ",
+        (unsigned long)(uintptr_t)sb,
+        px ? (int)CVPixelBufferGetWidth(px) : -1,
+        px ? (int)CVPixelBufferGetHeight(px) : -1);
+
+    if (attachments && CFArrayGetCount(attachments) > 0) {
+        CFDictionaryRef att0 = CFArrayGetValueAtIndex(attachments, 0);
+        if (att0) {
+            NSDictionary *d = (__bridge NSDictionary *)att0;
+            for (NSString *k in d) {
+                id v = d[k];
+                off += snprintf(buf + off, sizeof(g_orientDump) - off,
+                    "%s=%s; ", [k UTF8String], [[v description] UTF8String]);
+            }
+        }
+    }
+
+    // Clean Aperture + Pixel Aspect Ratio aus Format-Extensions
+    if (fmt) {
+        CFDictionaryRef ext = CMFormatDescriptionGetExtensions(fmt);
+        if (ext) {
+            CFDictionaryRef cleanAperture = CFDictionaryGetValue(
+                ext, kCMFormatDescriptionExtension_CleanAperture);
+            if (cleanAperture) {
+                off += snprintf(buf + off, sizeof(g_orientDump) - off,
+                    "CleanAperture=%@; ", (__bridge NSDictionary *)cleanAperture);
+            }
+            CFDictionaryRef par = CFDictionaryGetValue(
+                ext, kCMFormatDescriptionExtension_PixelAspectRatio);
+            if (par) {
+                off += snprintf(buf + off, sizeof(g_orientDump) - off,
+                    "PixelAspectRatio=%@; ", (__bridge NSDictionary *)par);
+            }
+            NSNumber *rot = (__bridge NSNumber *)CFDictionaryGetValue(
+                ext, @"Rotation");
+            if (rot) {
+                off += snprintf(buf + off, sizeof(g_orientDump) - off,
+                    "Rotation=%@; ", rot);
+            }
+        }
+    }
+    L("Orientierungs-Dump: %s", g_orientDump);
+}
+
 // ---- BWImageQueueSinkNode (PREVIEW-Pfad!) ----
 // Beobachtung immer; Replacement NUR in stage 3 (und nur wenn kein
 // Foto/Recording läuft). Der Preview-Sink nutzt p420 — swapPixelsInPlace
 // verifiziert das Layout zur Laufzeit.
 %hook BWImageQueueSinkNode
 - (void)renderSampleBuffer:(id)sampleBuffer forInput:(id)input {
-    measureSinkAtomic(&g_iqCalls, &g_iqWidth, &g_iqHeight, &g_iqFmt, &g_iqSurf,
-                      (__bridge CMSampleBufferRef)sampleBuffer);
+    CMSampleBufferRef sb = (__bridge CMSampleBufferRef)sampleBuffer;
+    measureSinkAtomic(&g_iqCalls, &g_iqWidth, &g_iqHeight, &g_iqFmt, &g_iqSurf, sb);
+    dumpOrientationAttachments(sb);
     if (atomic_load(&g_stage) >= 3 && atomic_load(&g_replacementEnabled) &&
         !atomic_load(&g_photoInProgress) && !atomic_load(&g_recordingInProgress)) {
-        CMSampleBufferRef sb = (__bridge CMSampleBufferRef)sampleBuffer;
         if (swapPixelsInPlace(sb)) {
             atomic_fetch_add(&g_iqSwaps, 1);
             %orig;
