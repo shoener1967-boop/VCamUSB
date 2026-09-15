@@ -361,7 +361,8 @@ static void scaleNV12Plane(const uint8_t *sp, size_t srcStride, size_t srcW, siz
     if (cropX + cropW > srcW || cropY + cropH > srcH) return;
     for (size_t y = 0; y < dstH; y++) {
         size_t sy = cropY + (y * cropH) / dstH;
-        const uint8_t *srcRow = sp + sy * srcStride + cropX;
+        // KEIN cropX in der Zeilenbasis — sx addiert ihn exakt einmal.
+        const uint8_t *srcRow = sp + sy * srcStride;
         uint8_t *dstRow = dp + y * dstStride;
         for (size_t x = 0; x < dstW; x++) {
             size_t sx = cropX + (x * cropW) / dstW;
@@ -380,7 +381,8 @@ static void scaleNV12UVPlane(const uint8_t *sp, size_t srcStride, size_t srcW, s
     if (cropX + cropW > srcW || cropY + cropH > srcH) return;
     for (size_t y = 0; y < dstH; y++) {
         size_t sy = cropY + (y * cropH) / dstH;
-        const uint8_t *srcRow = sp + sy * srcStride + cropX * 2;
+        // KEIN cropX*2 in der Zeilenbasis — sx addiert exakt einmal.
+        const uint8_t *srcRow = sp + sy * srcStride;
         uint8_t *dstRow = dp + y * dstStride;
         for (size_t x = 0; x < dstW; x++) {
             size_t sx = cropX + (x * cropW) / dstW;
