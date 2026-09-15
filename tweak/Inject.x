@@ -1,3 +1,5 @@
+%config(generator=internal)
+
 // VCamInject v2 — Sauberer Neubau nach verifiziertem LordVCAM arm64e-Ablauf
 //
 // Architektur:
