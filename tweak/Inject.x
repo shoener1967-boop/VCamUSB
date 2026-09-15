@@ -858,11 +858,12 @@ static void statusServerThread(void) {
     while (1) {
         int c = accept(srv, NULL, NULL);
         if (c < 0) continue;
-        // Kommando lesen (nicht-blockierend): "stage=N" schaltet die Stufe um.
+        // Kommando lesen (nicht-blockierend): "stage=N", "fulldump", sonst lesen.
         char cmd[64] = {0};
         struct timeval tv = { .tv_sec = 0, .tv_usec = 150000 };
         setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
         ssize_t cr = recv(c, cmd, sizeof(cmd) - 1, 0);
+        int wantFullDump = 0;
         if (cr > 0) {
             if (strncmp(cmd, "stage=", 6) == 0) {
                 int ns = atoi(cmd + 6);
@@ -870,9 +871,11 @@ static void statusServerThread(void) {
                     atomic_store(&g_stage, ns);
                     L("STAGE jetzt %d", ns);
                 }
+            } else if (strncmp(cmd, "fulldump", 8) == 0) {
+                wantFullDump = 1;
             }
         }
-        char msg[5120];
+        char msg[16384];
         int w = snprintf(msg, sizeof(msg),
             "build=%s stage=%d\n"
             "rxNal=%llu sps=%llu pps=%llu idr=%llu "
@@ -937,25 +940,27 @@ static void statusServerThread(void) {
                 (long long)atomic_load(&g_misSrcH));
             if (mw > 0) w += mw;
         }
-        if (g_methodDump[0]) {
-            int mw = snprintf(msg + w, sizeof(msg) - w, "BW: %s\n", g_methodDump);
-            if (mw > 0) w += mw;
-        }
-        if (g_methodDump2[0]) {
-            int mw = snprintf(msg + w, sizeof(msg) - w, "FigCap: %s\n", g_methodDump2);
-            if (mw > 0) w += mw;
-        }
-        if (g_copyClasses[0]) {
-            int mw = snprintf(msg + w, sizeof(msg) - w, "COPYNEXT: %s\n", g_copyClasses);
-            if (mw > 0) w += mw;
-        }
-        if (g_sinkClasses[0]) {
-            int mw = snprintf(msg + w, sizeof(msg) - w, "SINKS: %s\n", g_sinkClasses);
-            if (mw > 0) w += mw;
-        }
-        if (g_selectorDump[0]) {
-            int mw = snprintf(msg + w, sizeof(msg) - w, "SELOWNER:\n%s\n", g_selectorDump);
-            if (mw > 0) w += mw;
+        if (wantFullDump) {
+            if (g_methodDump[0]) {
+                int mw = snprintf(msg + w, sizeof(msg) - w, "BW: %s\n", g_methodDump);
+                if (mw > 0) w += mw;
+            }
+            if (g_methodDump2[0]) {
+                int mw = snprintf(msg + w, sizeof(msg) - w, "FigCap: %s\n", g_methodDump2);
+                if (mw > 0) w += mw;
+            }
+            if (g_copyClasses[0]) {
+                int mw = snprintf(msg + w, sizeof(msg) - w, "COPYNEXT: %s\n", g_copyClasses);
+                if (mw > 0) w += mw;
+            }
+            if (g_sinkClasses[0]) {
+                int mw = snprintf(msg + w, sizeof(msg) - w, "SINKS: %s\n", g_sinkClasses);
+                if (mw > 0) w += mw;
+            }
+            if (g_selectorDump[0]) {
+                int mw = snprintf(msg + w, sizeof(msg) - w, "SELOWNER:\n%s\n", g_selectorDump);
+                if (mw > 0) w += mw;
+            }
         }
         {
             pthread_mutex_lock(&g_objMutex);
@@ -966,7 +971,7 @@ static void statusServerThread(void) {
             }
             for (int i = 0; i < used && w < (int)sizeof(msg) - 300; i++) {
                 int mw = snprintf(msg + w, sizeof(msg) - w,
-                    "OUT[%d]=0x%lx:%s:emits=%llu swaps=%llu %lldx%lld fmt=0x%08llx surf=%lld pts=%lld; ",
+                    "OUT[%d]=0x%lx:%s:emits=%llu swaps=%llu %lldx%lld fmt=0x%08llx surf=%lld pts=%lld\n",
                     i, (unsigned long)g_outputs[i].object,
                     g_outputs[i].className,
                     (unsigned long long)g_outputs[i].calls,
@@ -979,11 +984,8 @@ static void statusServerThread(void) {
                 if (mw > 0) w += mw;
             }
             pthread_mutex_unlock(&g_objMutex);
-            if (w > 0) {
-                msg[w++] = '\n';
-            }
         }
-        if (atomic_load(&g_handoffDumped)) {
+        if (wantFullDump && atomic_load(&g_handoffDumped)) {
             int mw = snprintf(msg + w, sizeof(msg) - w,
                 "HANDOFF orig(v=%lld r=%lld s=%lld img=%lld data=%lld fmt=%lld surf=%lld/%lld fr=%lld) "
                 "repl(v=%lld r=%lld s=%lld img=%lld data=%lld fmt=%lld surf=%lld/%lld fr=%lld)\n"
