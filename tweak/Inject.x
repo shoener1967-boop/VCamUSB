@@ -350,12 +350,22 @@ static _Atomic int64_t g_misDstFmt = 0, g_misDstW = 0, g_misDstH = 0;
 static _Atomic int64_t g_misSrcFmt = 0, g_misSrcW = 0, g_misSrcH = 0;
 static _Atomic int64_t g_fmtDumped = 0;
 
+// Range-Helfer: Full->Video (219/224/255) und Video->Full.
+// Ganzzahlig, keine Floats in der Hot-Loop.
+static inline uint8_t fullToVideoY(uint8_t v)   { return (uint8_t)(((219u * v) / 255u) + 16u); }
+static inline uint8_t fullToVideoC(uint8_t v)   { return (uint8_t)(((224u * v) / 255u) + 16u); }
+static inline uint8_t videoToFullY(uint8_t v)   { return (uint8_t)((255u * (uint32_t)(v - 16u)) / 219u); }
+static inline uint8_t videoToFullC(uint8_t v)   { return (uint8_t)((255u * (uint32_t)(v - 16u)) / 224u); }
+typedef uint8_t (*ConvFn)(uint8_t);
+
 // NV12 biplanar: Y-Plane + interleaved UV-Plane skalieren (Center-Crop).
 // srcW/srcH = Quellgröße, dstW/dstH = Zielgröße. Stride-aware Zeilen-Kopie.
 // NULL-safe: bei ungültigen Zeigern sofort abbrechen (kein Crash).
+// conv: Range-Konvertierung pro Byte (NULL = 1:1 kopieren).
 static void scaleNV12Plane(const uint8_t *sp, size_t srcStride, size_t srcW, size_t srcH,
                            uint8_t *dp, size_t dstStride, size_t dstW, size_t dstH,
-                           size_t cropX, size_t cropY, size_t cropW, size_t cropH) {
+                           size_t cropX, size_t cropY, size_t cropW, size_t cropH,
+                           ConvFn conv) {
     if (!sp || !dp || !srcStride || !dstStride || !srcW || !srcH || !dstW || !dstH) return;
     if (!cropW || !cropH) return;
     if (cropX + cropW > srcW || cropY + cropH > srcH) return;
@@ -366,16 +376,18 @@ static void scaleNV12Plane(const uint8_t *sp, size_t srcStride, size_t srcW, siz
         uint8_t *dstRow = dp + y * dstStride;
         for (size_t x = 0; x < dstW; x++) {
             size_t sx = cropX + (x * cropW) / dstW;
-            dstRow[x] = srcRow[sx];
+            uint8_t v = srcRow[sx];
+            dstRow[x] = conv ? conv(v) : v;
         }
     }
 }
 
 // UV-Plane in NV12 ist interleaved CbCr: 2 Bytes pro Pixel. Nicht byteweise skalieren!
-// NULL-safe wie Y-Plane.
+// NULL-safe wie Y-Plane. conv für beide Bytes (Cb und Cr getrennt anwenden).
 static void scaleNV12UVPlane(const uint8_t *sp, size_t srcStride, size_t srcW, size_t srcH,
                              uint8_t *dp, size_t dstStride, size_t dstW, size_t dstH,
-                             size_t cropX, size_t cropY, size_t cropW, size_t cropH) {
+                             size_t cropX, size_t cropY, size_t cropW, size_t cropH,
+                             ConvFn conv) {
     if (!sp || !dp || !srcStride || !dstStride || !srcW || !srcH || !dstW || !dstH) return;
     if (!cropW || !cropH) return;
     if (cropX + cropW > srcW || cropY + cropH > srcH) return;
@@ -388,8 +400,10 @@ static void scaleNV12UVPlane(const uint8_t *sp, size_t srcStride, size_t srcW, s
             size_t sx = cropX + (x * cropW) / dstW;
             size_t srcOff = sx * 2;
             size_t dstOff = x * 2;
-            dstRow[dstOff] = srcRow[srcOff];         // Cb
-            dstRow[dstOff + 1] = srcRow[srcOff + 1]; // Cr
+            uint8_t cb = srcRow[srcOff];
+            uint8_t cr = srcRow[srcOff + 1];
+            dstRow[dstOff] = conv ? conv(cb) : cb;           // Cb
+            dstRow[dstOff + 1] = conv ? conv(cr) : cr;       // Cr
         }
     }
 }
@@ -586,18 +600,29 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
             cropY &= ~(size_t)1;
             cropW &= ~(size_t)1;
             cropH &= ~(size_t)1;
+            // Range-Konvertierung: Quelle Full-Range (420f) -> Ziel Video-Range?
+            BOOL srcFullRange = (sfmt == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange);
+            BOOL dstFullRange = (dfmt == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange);
+            ConvFn convY = NULL, convC = NULL;
+            if (srcFullRange && !dstFullRange) {
+                convY = fullToVideoY;
+                convC = fullToVideoC;
+            } else if (!srcFullRange && dstFullRange) {
+                convY = videoToFullY;
+                convC = videoToFullC;
+            }
             // Y-Plane (volle Auflösung)
             scaleNV12Plane(CVPixelBufferGetBaseAddressOfPlane(src, 0),
                            CVPixelBufferGetBytesPerRowOfPlane(src, 0), sw, sh,
                            CVPixelBufferGetBaseAddressOfPlane(dst, 0),
                            CVPixelBufferGetBytesPerRowOfPlane(dst, 0), dw, dh,
-                           cropX, cropY, cropW, cropH);
+                           cropX, cropY, cropW, cropH, convY);
             // UV-Plane (halbe Auflösung, interleaved CbCr)
             scaleNV12UVPlane(CVPixelBufferGetBaseAddressOfPlane(src, 1),
                            CVPixelBufferGetBytesPerRowOfPlane(src, 1), sw / 2, sh / 2,
                            CVPixelBufferGetBaseAddressOfPlane(dst, 1),
                            CVPixelBufferGetBytesPerRowOfPlane(dst, 1), dw / 2, dh / 2,
-                           cropX / 2, cropY / 2, cropW / 2, cropH / 2);
+                           cropX / 2, cropY / 2, cropW / 2, cropH / 2, convC);
             ok = YES;
             atomic_fetch_add(&g_inplaceScaled, 1);
             }   // Ende: Center-Crop-Zweig
