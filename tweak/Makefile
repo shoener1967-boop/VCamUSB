@@ -4,7 +4,10 @@
 #   VCamProbe -> minimaler Lade-/Diagnose-Canary (beide Prozesse)
 #
 # Build:  make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
-TARGET := iphone:clang:latest:13.0
+# WICHTIG: 14.0-Deployment nötig, damit die Toolchain arm64e bauen kann!
+# (iOS 13.0 + arm64e geht nicht — Warning im CI-Log. Das Gerät ist arm64e,
+#  roothide lädt nur Universal-Binaries sauber.)
+TARGET := iphone:clang:latest:14.0
 TWEAK_NAME := VCamHub VCamInject VCamProbe VCamAVF DeviceDump
 
 # ---- Hub: kein Substrate (constructor + Notification-Observer), UIKit für UIWindow
