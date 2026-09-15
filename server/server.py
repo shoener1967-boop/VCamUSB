@@ -275,7 +275,10 @@ class SourceReader:
 class Encoder:
     def __init__(self, fps):
         self.fps = fps
-        self.pipe = os.path.join(os.environ.get("TEMP", "/tmp"), "vcam_out.h264")
+        # Generation-ID: JEDE Encoder-Instanz bekommt eine eigene Pipe.
+        # So liest der Pusher nie in eine alte/stale Pipe hinein.
+        self.gen = int(time.time() * 1000) % 100000
+        self.pipe = os.path.join(os.environ.get("TEMP", "/tmp"), f"vcam_out_{self.gen}.h264")
         self.fflog_path = os.path.join(os.environ.get("TEMP", "/tmp"), "vcam_ffmpeg.log")
         self._start()
 
@@ -452,8 +455,12 @@ class FramePusher:
                     self.state["connected"] = True
                     log.info("connected to %s:%s", self.ip, self.port)
                     await ws.send(json.dumps({"type": "hs", "v": 1}))
-                    # wait for pipe
-                    while not os.path.exists(self.pipe) and not self._closed:
+                    # wait for pipe (dynamisch aus dem Resolver)
+                    def current_pipe():
+                        return getattr(self, "pipe_resolver", None) and \
+                               self.pipe_resolver.get() or self.pipe
+                    while (not current_pipe() or
+                           not os.path.exists(current_pipe())) and not self._closed:
                         await asyncio.sleep(0.1)
 
                     # Persistenter Annex-B-Puffer + AU-Zusammenbau.
@@ -510,18 +517,33 @@ class FramePusher:
                             self.state["frames_sent"] += 1
                             return
 
-                    # Pipe-Leser mit Trunkierungs-Erkennung:
-                    # Bei ffmpeg-Neustart wird die Pipe neu erstellt (kleiner).
-                    # Wenn die Datei kleiner wird als unsere Leseposition,
-                    # neu öffnen (handle bleibt am Anfang).
+                    # Pipe-Leser: liest die AKTUELLE Generations-Pipe.
+                    # Wechselt der Encoder die Pipe (Neustart), wird die neue
+                    # Pipe ab Anfang gelesen. Keine stale-Pipe-Reste mehr.
                     import os as _os
                     import msvcrt as _msvcrt
                     f = None
                     read_pos = 0
+                    cur_gen = None
                     while not self._closed:
+                        # Aktuelle Pipe ermitteln (ändert sich bei Encoder-Restart)
+                        pipe_now = current_pipe()
+                        if pipe_now != cur_gen:
+                            # Neue Generation: alles zurücksetzen
+                            if f is not None:
+                                try:
+                                    f.close()
+                                except Exception:
+                                    pass
+                            f = None
+                            read_pos = 0
+                            cur_gen = pipe_now
+                        if not pipe_now or not _os.path.exists(pipe_now):
+                            await asyncio.sleep(0.05)
+                            continue
                         # Datei-Handle aktuell halten (Reopen bei Trunkierung)
                         try:
-                            cur_size = _os.path.getsize(self.pipe)
+                            cur_size = _os.path.getsize(pipe_now)
                         except OSError:
                             cur_size = -1
                         if f is None or (cur_size >= 0 and read_pos > cur_size):
@@ -534,7 +556,7 @@ class FramePusher:
                             read_pos = 0
                         if f is None:
                             try:
-                                f = open(self.pipe, "rb")
+                                f = open(pipe_now, "rb")
                                 _msvcrt.setmode(f.fileno(), _os.O_BINARY)
                                 f.seek(read_pos)
                             except Exception:
@@ -820,9 +842,16 @@ async def main():
         logbuf.add("debug", f"camera mapped to index {idx}")
 
     state["start_time"] = time.time()
-    pusher = FramePusher(pipeline.encoder.pipe if pipeline.encoder else "", a.ip, a.port, state)
-    # pusher reads pipe path dynamically
-    pusher.pipe = os.path.join(os.environ.get("TEMP", "/tmp"), "vcam_out.h264")
+    # Pusher liest die Pipe-DYNAMISCH aus der aktuellen Encoder-Instanz.
+    # Der Encoder bekommt bei jedem Neustart eine neue Generations-Pipe.
+    class PipeResolver:
+        def __init__(self, pipeline):
+            self.pipeline = pipeline
+        def get(self):
+            enc = self.pipeline.encoder
+            return enc.pipe if enc else ""
+    pusher = FramePusher(PipeResolver(pipeline).get(), a.ip, a.port, state)
+    pusher.pipe_resolver = PipeResolver(pipeline)
     asyncio.create_task(pusher.run())
 
     try:
