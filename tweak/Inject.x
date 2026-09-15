@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "vimage-ccw-2026-09-15-01"
+#define VCAM_BUILD_ID "needsccw90-2026-09-15-01"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -624,6 +624,15 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
                         (CFDictionaryRef)pbAtts, (CFStringRef)@"RotationDegrees");
                     if (rd) rotDeg = [rd intValue];
                 }
+            }
+            // LordVCAM-Fallback (arm64e-Datenfluss BELEGT, 14f90.asm:3936):
+            //   needsCCW90 = (aspect > 1.5) && (width >= height)
+            // Gemessen an der ZIEL-Buffer-Geometrie (der Buffer, den der
+            // Capture-Graph liefert = unser dst). Passt zu den Messungen:
+            // TikTok 1280x720 (16:9) -> CCW90, Kamera-App 1440x1080 (4:3) -> keine.
+            if (rotDeg == 0) {
+                double dstAspect = (double)dw / (double)dh;
+                if (dstAspect > 1.5 && dw >= dh) rotDeg = 90;
             }
             // Range-Konvertierung: Quelle Full-Range (420f) -> Ziel Video-Range?
             BOOL srcFullRange = (sfmt == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange);
