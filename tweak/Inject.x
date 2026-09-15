@@ -455,7 +455,7 @@ static void rotateScalePlane(const uint8_t *sp, size_t srcStride, size_t srcW, s
     if (conv) {
         static uint8_t lutY[256]; static BOOL lutYInit = NO;
         if (!lutYInit) { for (int i = 0; i < 256; i++) lutY[i] = conv((uint8_t)i); lutYInit = YES; }
-        vImageTableLookUp_Planar8(&dstBuf, &dstBuf, lutY, 0, kvImageNoFlags);
+        vImageTableLookUp_Planar8(&dstBuf, &dstBuf, lutY, kvImageNoFlags);
     }
     free(tmp);
 }
