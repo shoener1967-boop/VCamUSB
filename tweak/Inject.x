@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "p420-preview-2026-09-15-01"
+#define VCAM_BUILD_ID "orient-diag-2026-09-15-02"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -106,6 +106,9 @@ static _Atomic int64_t g_stWidth = 0, g_stHeight = 0, g_stFmt = 0, g_stSurf = 0;
 // BWImageQueueSinkNode auslesen, um Rotation/Transform zu verstehen).
 static char g_orientDump[4096] = {0};
 static _Atomic int64_t g_orientDumped = 0;
+// Zwei getrennte Dumps: Porträt-Größen 750x1000 (Foto) und 750x1334 (Video).
+static char g_orientDump_video[4096] = {0};
+static _Atomic int64_t g_orientDumped_video = 0;
 
 // ---------------------------------------------------------------- Globals
 static NSMutableArray<NSData *> *g_nalQueue = nil;
@@ -1067,6 +1070,10 @@ static void statusServerThread(void) {
             int mw = snprintf(msg + w, sizeof(msg) - w, " %s\n", g_orientDump);
             if (mw > 0) w += mw;
         }
+        if (atomic_load(&g_orientDumped_video)) {
+            int mw = snprintf(msg + w, sizeof(msg) - w, " %s\n", g_orientDump_video);
+            if (mw > 0) w += mw;
+        }
         if (atomic_load(&g_fmtDumped)) {
             int mw = snprintf(msg + w, sizeof(msg) - w, " MIS dst=0x%08x %lldx%lld src=0x%08x %lldx%lld\n",
                 (unsigned)(long long)atomic_load(&g_misDstFmt),
@@ -1487,38 +1494,53 @@ static void measureSinkAtomic(_Atomic uint64_t *calls, _Atomic int64_t *w,
 }
 
 // Von Astra gefordert: Orientierung/Transform-Attachments des ORIGINAL-
-// SampleBuffers auslesen. Einmalig dumpen (g_orientDumped-Guard).
+// SampleBuffers UND dessen CVPixelBuffer-Attachments auslesen.
+// Getrennte Dumps: 750x1000 (Foto) und 750x1334 (Video).
 static void dumpOrientationAttachments(CMSampleBufferRef sb) {
     if (!sb) return;
-    if (atomic_load(&g_orientDumped)) return;
-    atomic_store(&g_orientDumped, 1);
-
-    CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(sb, true);
-    CMFormatDescriptionRef fmt = CMSampleBufferGetFormatDescription(sb);
     CVPixelBufferRef px = CMSampleBufferGetImageBuffer(sb);
+    if (!px) return;
+    int w = (int)CVPixelBufferGetWidth(px);
+    int h = (int)CVPixelBufferGetHeight(px);
 
+    char *buf;
+    _Atomic int64_t *guard;
+    if (w == 750 && h == 1334) { buf = g_orientDump_video; guard = &g_orientDumped_video; }
+    else { buf = g_orientDump; guard = &g_orientDumped; }
+    if (atomic_load(guard)) return;
+    atomic_store(guard, 1);
+
+    CMFormatDescriptionRef fmt = CMSampleBufferGetFormatDescription(sb);
     size_t off = 0;
-    char *buf = g_orientDump;
-    off += snprintf(buf + off, sizeof(g_orientDump) - off,
-        "ORIENT sb=0x%lx w=%d h=%d ",
-        (unsigned long)(uintptr_t)sb,
-        px ? (int)CVPixelBufferGetWidth(px) : -1,
-        px ? (int)CVPixelBufferGetHeight(px) : -1);
+    off += snprintf(buf + off, 4096 - off, "ORIENT w=%d h=%d fmt=0x%08x ", w, h,
+                    (unsigned)CVPixelBufferGetPixelFormatType(px));
 
+    // 1) CVPixelBuffer-Attachments (dort steckt meist die Orientierung!)
+    CFDictionaryRef pbAtts = CVBufferGetAttachments(px, kCVAttachmentMode_ShouldPropagate);
+    if (pbAtts) {
+        NSDictionary *d = (__bridge NSDictionary *)pbAtts;
+        for (NSString *k in d) {
+            id v = d[k];
+            off += snprintf(buf + off, 4096 - off, "PB[%s]=%s; ",
+                            [k UTF8String], [[v description] UTF8String]);
+        }
+    }
+
+    // 2) SampleBuffer-Attachments
+    CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(sb, true);
     if (attachments && CFArrayGetCount(attachments) > 0) {
         CFDictionaryRef att0 = CFArrayGetValueAtIndex(attachments, 0);
         if (att0) {
             NSDictionary *d = (__bridge NSDictionary *)att0;
             for (NSString *k in d) {
                 id v = d[k];
-                NSString *vs = [v description];
-                off += snprintf(buf + off, sizeof(g_orientDump) - off,
-                    "%s=%s; ", [k UTF8String], [vs UTF8String]);
+                off += snprintf(buf + off, 4096 - off, "SB[%s]=%s; ",
+                                [k UTF8String], [[v description] UTF8String]);
             }
         }
     }
 
-    // Clean Aperture + Pixel Aspect Ratio aus Format-Extensions
+    // 3) Clean Aperture + Pixel Aspect Ratio + Rotation aus Format-Extensions
     if (fmt) {
         CFDictionaryRef ext = CMFormatDescriptionGetExtensions(fmt);
         if (ext) {
@@ -1526,26 +1548,23 @@ static void dumpOrientationAttachments(CMSampleBufferRef sb) {
                 ext, kCMFormatDescriptionExtension_CleanAperture);
             if (cleanAperture) {
                 NSString *s = [(__bridge NSDictionary *)cleanAperture description];
-                off += snprintf(buf + off, sizeof(g_orientDump) - off,
-                    "CleanAperture=%s; ", [s UTF8String]);
+                off += snprintf(buf + off, 4096 - off, "CleanAperture=%s; ", [s UTF8String]);
             }
             CFDictionaryRef par = CFDictionaryGetValue(
                 ext, kCMFormatDescriptionExtension_PixelAspectRatio);
             if (par) {
                 NSString *s = [(__bridge NSDictionary *)par description];
-                off += snprintf(buf + off, sizeof(g_orientDump) - off,
-                    "PixelAspectRatio=%s; ", [s UTF8String]);
+                off += snprintf(buf + off, 4096 - off, "PixelAspectRatio=%s; ", [s UTF8String]);
             }
-            NSNumber *rot = (__bridge NSNumber *)CFDictionaryGetValue(
-                ext, @"Rotation");
+            // Rotation key ausprobieren (kCMFormatDescriptionKey und alte iOS-Schlüssel)
+            NSNumber *rot = (__bridge NSNumber *)CFDictionaryGetValue(ext, @"Rotation");
+            if (!rot) rot = (__bridge NSNumber *)CFDictionaryGetValue(ext, @"Orientation");
             if (rot) {
-                NSString *s = [rot stringValue];
-                off += snprintf(buf + off, sizeof(g_orientDump) - off,
-                    "Rotation=%s; ", [s UTF8String]);
+                off += snprintf(buf + off, 4096 - off, "Rot=%s; ", [[rot stringValue] UTF8String]);
             }
         }
     }
-    L("Orientierungs-Dump: %s", g_orientDump);
+    L("Orient-Dump(%dx%d): %s", w, h, buf);
 }
 
 // ---- BWImageQueueSinkNode (PREVIEW-Pfad!) ----
