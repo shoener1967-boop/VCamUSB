@@ -8,6 +8,9 @@
 # (iOS 13.0 + arm64e geht nicht — Warning im CI-Log. Das Gerät ist arm64e,
 #  roothide lädt nur Universal-Binaries sauber.)
 TARGET := iphone:clang:latest:14.0
+# Explizit BEIDE Archs bauen — das Gerät ist arm64e (A11), roothide lädt
+# nur Universal-Binaries sauber. Ohne ARCHS baut Theos nur arm64.
+ARCHS := arm64 arm64e
 TWEAK_NAME := VCamHub VCamInject VCamProbe VCamAVF DeviceDump
 
 # ---- Hub: kein Substrate (constructor + Notification-Observer), UIKit für UIWindow
