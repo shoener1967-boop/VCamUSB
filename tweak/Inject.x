@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "orient-diag-2026-09-15-02"
+#define VCAM_BUILD_ID "vimage-ccw-2026-09-15-01"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -416,61 +416,84 @@ static void scaleNV12UVPlane(const uint8_t *sp, size_t srcStride, size_t srcW, s
     }
 }
 
-// 90°-Rotations-Scale (CW und CCW) für Orientierungswechsel.
-// Quelle 1920x1080 (landscape) -> Ziel 750x1334 (portrait): rotieren + skalieren.
-// RotationDegrees=90: dst wird aus src per CW-Rotation gelesen.
-// conv: Range-Konvertierung (NULL = 1:1).
-// Geometry (Y-Plane, volle Auflösung):
-//   rotiert 90° CW: dst(x,y) = src(x_src, y_src) mit
-//     x_src = srcH - 1 - y_dst_scaled,  y_src = x_dst_scaled
-static void rotate90Plane(const uint8_t *sp, size_t srcStride, size_t srcW, size_t srcH,
-                          uint8_t *dp, size_t dstStride, size_t dstW, size_t dstH,
-                          BOOL cw, ConvFn conv) {
+// 90°-Rotation via Accelerate/vImage — exakt LordVCAM-Pfad 2 (Disassembly verifiziert):
+// Y:  vImageRotate90_Planar8  (bg 0)
+// UV: vImageRotate90_Planar16U (bg 0x8080, CbCr-Paare bleiben zusammen!)
+// Danach Scale, zuletzt LUT in-place auf dst (Range).
+// Reihenfolge: Rotate90 -> Scale -> TableLookUp (LordVCAM 0x4d634/0x4d6c4/0x4d898)
+
+// (makeLUT entfernt — Range-LUT wird direkt in rotateScalePlane erzeugt)
+
+// Rotiert src (srcW x srcH) um 90° in einen TEMP-Buffer (srcH x srcW),
+// skaliert dann auf dst (dstW x dstH), danach LUT in-place auf dst (Range).
+// rotConst: vImage-Rotationskonstante (LordVCAM-Pfad 2):
+//   rotDeg=90  -> 3 = kRotate270DegreesClockwise  (= 90° CCW)
+//   rotDeg=180 -> 2 = kRotate180DegreesClockwise
+//   rotDeg=270 -> 1 = kRotate90DegreesClockwise   (= 90° CW)
+static void rotateScalePlane(const uint8_t *sp, size_t srcStride, size_t srcW, size_t srcH,
+                             uint8_t *dp, size_t dstStride, size_t dstW, size_t dstH,
+                             uint8_t rotConst, ConvFn conv) {
     if (!sp || !dp || !srcStride || !dstStride || !srcW || !srcH || !dstW || !dstH) return;
-    // rotiert sind die Ziel-Dimensionen vertauscht: Ziel 750x1334 <- Quelle 1920x1080
-    // rotierte Quelle: Breite=srcH, Höhe=srcW
-    size_t rotW = srcH, rotH = srcW;
-    for (size_t y = 0; y < dstH; y++) {
-        size_t ry = y * rotH / dstH;      // y im rotierten Bild (0..srcW)
-        uint8_t *dstRow = dp + y * dstStride;
-        for (size_t x = 0; x < dstW; x++) {
-            size_t rx = x * rotW / dstW;  // x im rotierten Bild (0..srcH)
-            size_t sx, sy;
-            if (cw) {
-                // 90° CW: new[x][y] = src[srcW-1-y][x]
-                sx = srcW - 1 - ry;
-                sy = rx;
-            } else {
-                // 90° CCW: new[x][y] = src[y][srcH-1-x]
-                sx = ry;
-                sy = srcH - 1 - rx;
-            }
-            uint8_t v = sp[sy * srcStride + sx];
-            dstRow[x] = conv ? conv(v) : v;
-        }
+    // Nach 90°: output width=srcH, output height=srcW.
+    size_t rotW = srcH;
+    size_t rotH = srcW;
+    size_t tmpRowBytes = rotW;
+    if (rotW > SIZE_MAX / rotH) return;
+    uint8_t *tmp = malloc(tmpRowBytes * rotH);
+    if (!tmp) return;
+    // LordVCAM: vImage_Buffer height/width vertauscht gepflegt — hier:
+    // src.height=srcH, src.width=srcW, rowBytes=srcStride (echte Stride!).
+    vImage_Buffer srcBuf = { (void *)sp, srcH, srcW, srcStride };
+    vImage_Buffer tmpBuf = { tmp, rotH, rotW, tmpRowBytes };
+    vImage_Buffer dstBuf = { dp, dstH, dstW, dstStride };
+    vImage_Error err = vImageRotate90_Planar8(&srcBuf, &tmpBuf, rotConst, 0, kvImageNoFlags);
+    if (err != kvImageNoError) { free(tmp); return; }
+    // Skalieren auf Ziel (LordVCAM: Scale NACH Rotate)
+    err = vImageScale_Planar8(&tmpBuf, &dstBuf, NULL, kvImageNoFlags);
+    if (err != kvImageNoError) { free(tmp); return; }
+    // Range-Konvertierung zuletzt, in-place auf dst (LordVCAM: vImageTableLookUp in-place)
+    if (conv) {
+        static uint8_t lutY[256]; static BOOL lutYInit = NO;
+        if (!lutYInit) { for (int i = 0; i < 256; i++) lutY[i] = conv((uint8_t)i); lutYInit = YES; }
+        vImageTableLookUp_Planar8(&dstBuf, &dstBuf, lutY, 0, kvImageNoFlags);
     }
+    free(tmp);
 }
 
-// UV-Plane (interleaved, halbe Auflösung): gleiche Rotation.
-static void rotate90UVPlane(const uint8_t *sp, size_t srcStride, size_t srcW, size_t srcH,
-                            uint8_t *dp, size_t dstStride, size_t dstW, size_t dstH,
-                            BOOL cw, ConvFn conv) {
+// UV-Plane: interleaved CbCr, halbe Auflösung. LordVCAM rotiert sie als
+// vImageRotate90_Planar16U mit background=0x8080 (neutrales CbCr-Paar) —
+// dadurch bleiben CbCr-Paare zusammen. Danach byteweise Skalierung auf dst
+// (2 Bytes/Pixel; Cb und Cr bekommen identische Behandlung).
+static void rotateScaleUVPlane(const uint8_t *sp, size_t srcStride, size_t srcW, size_t srcH,
+                               uint8_t *dp, size_t dstStride, size_t dstW, size_t dstH,
+                               uint8_t rotConst, ConvFn conv) {
     if (!sp || !dp || !srcStride || !dstStride || !srcW || !srcH || !dstW || !dstH) return;
-    size_t rotW = srcH, rotH = srcW;   // halbe Auflösung: srcW/srcH sind bereits die halben DIMS
+    size_t rotW = srcH, rotH = srcW;
+    if (rotW > SIZE_MAX / rotH) return;
+    uint8_t *tmp = malloc(rotW * rotH * 2);
+    if (!tmp) return;
+    // 16-bit-Pixel: rowBytes muss gerade und >= width*2 sein
+    size_t srcRow = srcStride & ~(size_t)1;
+    size_t tmpRow = rotW * 2;
+    vImage_Buffer srcBuf = { (void *)sp, srcH, srcW, srcRow };
+    vImage_Buffer tmpBuf = { tmp, rotH, rotW, tmpRow };
+    // LordVCAM: background 0x8080 für UV (neutrales CbCr)
+    vImage_Error err = vImageRotate90_Planar16U(&srcBuf, &tmpBuf, rotConst, 0x8080, kvImageNoFlags);
+    if (err != kvImageNoError) { free(tmp); return; }
+    // Skalieren auf dst (Integer, interleaved 2-Byte-Pixel, Range inline)
     for (size_t y = 0; y < dstH; y++) {
         size_t ry = y * rotH / dstH;
         uint8_t *dstRow = dp + y * dstStride;
+        const uint8_t *srcRow = tmp + ry * tmpRow;
         for (size_t x = 0; x < dstW; x++) {
             size_t rx = x * rotW / dstW;
-            size_t sx, sy;
-            if (cw) { sx = srcW - 1 - ry; sy = rx; }
-            else    { sx = ry; sy = srcH - 1 - rx; }
-            uint8_t cb = sp[sy * srcStride + sx * 2];
-            uint8_t cr = sp[sy * srcStride + sx * 2 + 1];
-            dstRow[x * 2] = conv ? conv(cb) : cb;
+            uint8_t cb = srcRow[rx * 2];
+            uint8_t cr = srcRow[rx * 2 + 1];
+            dstRow[x * 2]     = conv ? conv(cb) : cb;
             dstRow[x * 2 + 1] = conv ? conv(cr) : cr;
         }
     }
+    free(tmp);
 }
 
 static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
@@ -615,19 +638,24 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
             }
 
             if (rotDeg != 0) {
-                // Rotation (90° oder 270°). CW wenn 90, CCW wenn 270.
-                BOOL cw = (rotDeg == 90);
-                if (rotDeg != 90 && rotDeg != 270) cw = YES;
-                rotate90Plane(CVPixelBufferGetBaseAddressOfPlane(src, 0),
+                // LordVCAM-Pfad 2 (Disassembly 0x4d590-0x4d5ac, verifiziert):
+                //   90°  -> Konstante 3 = kRotate270DegreesClockwise (effektiv CCW)
+                //   180° -> Konstante 2 = kRotate180DegreesClockwise
+                //   270° -> Konstante 1 = kRotate90DegreesClockwise  (CW)
+                uint8_t rotConst = 1;
+                if (rotDeg == 90)  rotConst = 3;
+                if (rotDeg == 180) rotConst = 2;
+                if (rotDeg == 270) rotConst = 1;
+                rotateScalePlane(CVPixelBufferGetBaseAddressOfPlane(src, 0),
                               CVPixelBufferGetBytesPerRowOfPlane(src, 0), sw, sh,
                               CVPixelBufferGetBaseAddressOfPlane(dst, 0),
                               CVPixelBufferGetBytesPerRowOfPlane(dst, 0), dw, dh,
-                              cw, convY);
-                rotate90UVPlane(CVPixelBufferGetBaseAddressOfPlane(src, 1),
+                              rotConst, convY);
+                rotateScaleUVPlane(CVPixelBufferGetBaseAddressOfPlane(src, 1),
                                 CVPixelBufferGetBytesPerRowOfPlane(src, 1), sw / 2, sh / 2,
                                 CVPixelBufferGetBaseAddressOfPlane(dst, 1),
                                 CVPixelBufferGetBytesPerRowOfPlane(dst, 1), dw / 2, dh / 2,
-                                cw, convC);
+                                rotConst, convC);
                 ok = YES;
                 atomic_fetch_add(&g_inplaceScaled, 1);
             } else {

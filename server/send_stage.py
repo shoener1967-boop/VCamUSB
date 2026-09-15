@@ -48,11 +48,13 @@ def main():
             if n in ("0", "1", "2", "3"):
                 cmd = f"stage={n}"
                 print(f"Setze stage={n}")
+            elif n == "stat":
+                pass   # nur lesen
             else:
                 print("Ungültige Stufe (0-3)")
                 return
         out = read_status(cli, cmd)
-        if want_stat or not args:
+        if want_stat or not args or args[0] == "stat":
             print(out)
     finally:
         cli.close()
