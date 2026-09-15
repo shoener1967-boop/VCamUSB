@@ -561,24 +561,10 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
             }
             ok = YES;
         } else {
-            // Orientierungs-Erkennung: Landscape-Quelle + Portrait-Ziel
-            // (z.B. 1920x1080 -> 750x1334) = 90°-Rotation, kein Crop.
-            // Sonst: Center-Crop + Skalierung (gleiche Orientierung).
-            BOOL srcLandscape = (sw >= sh);
-            BOOL dstLandscape = (dw >= dh);
-            if (srcLandscape != dstLandscape) {
-                // 90°-Rotations-Scale: beide Planes rotieren.
-                scaleNV12PlaneRot90(srcY, CVPixelBufferGetBytesPerRowOfPlane(src, 0),
-                                    sw, sh, dstY, CVPixelBufferGetBytesPerRowOfPlane(dst, 0),
-                                    dw, dh);
-                scaleNV12UVRot90(srcUV, CVPixelBufferGetBytesPerRowOfPlane(src, 1),
-                                 sw / 2, sh / 2, dstUV, CVPixelBufferGetBytesPerRowOfPlane(dst, 1),
-                                 dw / 2, dh / 2);
-                ok = YES;
-                atomic_fetch_add(&g_inplaceScaled, 1);
-            } else {
-            // Größen-Mismatch: Center-Crop + Skalierung pro Plane
-            // Seitenverhältnis erhalten: den größeren Quellausschnitt wählen
+            // Größen-Mismatch: Center-Crop + Skalierung pro Plane.
+            // KEINE Rotation hier! mediaserverd/BWPixelTransferNode macht die
+            // 90°-Orientierung selbst über CVBuffer-Attachments. Wir liefern
+            // nur Pixel im Sensor-Koordinatensystem (landscape).
             double srcAR = (double)sw / (double)sh;
             double dstAR = (double)dw / (double)dh;
             size_t cropW, cropH, cropX, cropY;
@@ -625,7 +611,6 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
                            cropX / 2, cropY / 2, cropW / 2, cropH / 2, convC);
             ok = YES;
             atomic_fetch_add(&g_inplaceScaled, 1);
-            }   // Ende: Center-Crop-Zweig
         }
 
         CVPixelBufferUnlockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
