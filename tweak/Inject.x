@@ -431,19 +431,19 @@ static void rotate90Plane(const uint8_t *sp, size_t srcStride, size_t srcW, size
     // rotierte Quelle: Breite=srcH, Höhe=srcW
     size_t rotW = srcH, rotH = srcW;
     for (size_t y = 0; y < dstH; y++) {
-        size_t ry = y * rotH / dstH;      // Ziel-Zeile -> rotierte Quelle-Zeile
+        size_t ry = y * rotH / dstH;      // y im rotierten Bild (0..srcW)
         uint8_t *dstRow = dp + y * dstStride;
         for (size_t x = 0; x < dstW; x++) {
-            size_t rx = x * rotW / dstW;  // Ziel-Spalte -> rotierte Quelle-Spalte
+            size_t rx = x * rotW / dstW;  // x im rotierten Bild (0..srcH)
             size_t sx, sy;
             if (cw) {
-                // CW: rotiert(x=rx,y=ry) = src(x=srcH-1-ry, y=rx)
-                sx = srcH - 1 - ry;
+                // 90° CW: new[x][y] = src[srcW-1-y][x]
+                sx = srcW - 1 - ry;
                 sy = rx;
             } else {
-                // CCW: rotiert(x=rx,y=ry) = src(x=ry, y=srcW-1-rx)
+                // 90° CCW: new[x][y] = src[y][srcH-1-x]
                 sx = ry;
-                sy = srcW - 1 - rx;
+                sy = srcH - 1 - rx;
             }
             uint8_t v = sp[sy * srcStride + sx];
             dstRow[x] = conv ? conv(v) : v;
@@ -463,8 +463,8 @@ static void rotate90UVPlane(const uint8_t *sp, size_t srcStride, size_t srcW, si
         for (size_t x = 0; x < dstW; x++) {
             size_t rx = x * rotW / dstW;
             size_t sx, sy;
-            if (cw) { sx = srcH - 1 - ry; sy = rx; }
-            else    { sx = ry; sy = srcW - 1 - rx; }
+            if (cw) { sx = srcW - 1 - ry; sy = rx; }
+            else    { sx = ry; sy = srcH - 1 - rx; }
             uint8_t cb = sp[sy * srcStride + sx * 2];
             uint8_t cr = sp[sy * srcStride + sx * 2 + 1];
             dstRow[x * 2] = conv ? conv(cb) : cb;
@@ -593,7 +593,9 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
             // trägt der Ziel-Buffer "RotationDegrees" != 0, müssen wir rotieren.
             int rotDeg = 0;
             {
-                CFDictionaryRef pbAtts = CVBufferGetAttachments(dst, kCVAttachmentMode_ShouldPropagate);
+                // ShouldNotPropagate: nur DIESEN Buffer lesen, keine veralteten
+                // Pool-Attachments (sonst rotiert Foto-Modus fälschlich).
+                CFDictionaryRef pbAtts = CVBufferGetAttachments(dst, kCVAttachmentMode_ShouldNotPropagate);
                 if (pbAtts) {
                     NSNumber *rd = (__bridge NSNumber *)CFDictionaryGetValue(
                         (CFDictionaryRef)pbAtts, (CFStringRef)@"RotationDegrees");
