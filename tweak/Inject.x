@@ -352,9 +352,13 @@ static _Atomic int64_t g_fmtDumped = 0;
 
 // NV12 biplanar: Y-Plane + interleaved UV-Plane skalieren (Center-Crop).
 // srcW/srcH = Quellgröße, dstW/dstH = Zielgröße. Stride-aware Zeilen-Kopie.
+// NULL-safe: bei ungültigen Zeigern sofort abbrechen (kein Crash).
 static void scaleNV12Plane(const uint8_t *sp, size_t srcStride, size_t srcW, size_t srcH,
                            uint8_t *dp, size_t dstStride, size_t dstW, size_t dstH,
                            size_t cropX, size_t cropY, size_t cropW, size_t cropH) {
+    if (!sp || !dp || !srcStride || !dstStride || !srcW || !srcH || !dstW || !dstH) return;
+    if (!cropW || !cropH) return;
+    if (cropX + cropW > srcW || cropY + cropH > srcH) return;
     for (size_t y = 0; y < dstH; y++) {
         size_t sy = cropY + (y * cropH) / dstH;
         const uint8_t *srcRow = sp + sy * srcStride + cropX;
@@ -367,9 +371,13 @@ static void scaleNV12Plane(const uint8_t *sp, size_t srcStride, size_t srcW, siz
 }
 
 // UV-Plane in NV12 ist interleaved CbCr: 2 Bytes pro Pixel. Nicht byteweise skalieren!
+// NULL-safe wie Y-Plane.
 static void scaleNV12UVPlane(const uint8_t *sp, size_t srcStride, size_t srcW, size_t srcH,
                              uint8_t *dp, size_t dstStride, size_t dstW, size_t dstH,
                              size_t cropX, size_t cropY, size_t cropW, size_t cropH) {
+    if (!sp || !dp || !srcStride || !dstStride || !srcW || !srcH || !dstW || !dstH) return;
+    if (!cropW || !cropH) return;
+    if (cropX + cropW > srcW || cropY + cropH > srcH) return;
     for (size_t y = 0; y < dstH; y++) {
         size_t sy = cropY + (y * cropH) / dstH;
         const uint8_t *srcRow = sp + sy * srcStride + cropX * 2;
@@ -456,8 +464,33 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
     }
 
     if (dst420 && src420 && layoutOK) {
-        CVPixelBufferLockBaseAddress(dst, 0);
-        CVPixelBufferLockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
+        // LOCK-ERFOLG prüfen: schlägt das Lock fehl (z.B. GPU-held Buffer
+        // ohne CPU-Zugriff), NICHT auf die Pixel zugreifen — das war der
+        // Respring-Crash.
+        CVReturn lkDst = CVPixelBufferLockBaseAddress(dst, 0);
+        CVReturn lkSrc = CVPixelBufferLockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
+        if (lkDst != kCVReturnSuccess || lkSrc != kCVReturnSuccess) {
+            if (lkDst == kCVReturnSuccess) CVPixelBufferUnlockBaseAddress(dst, 0);
+            if (lkSrc == kCVReturnSuccess) CVPixelBufferUnlockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
+            atomic_fetch_add(&g_inplaceLockFail, 1);
+            CVPixelBufferRelease(src);
+            atomic_fetch_add(&g_inplaceMismatch, 1);
+            return NO;
+        }
+
+        // Base-Addresses NACH dem Lock holen und prüfen (NULL -> abbrechen)
+        const uint8_t *srcY = CVPixelBufferGetBaseAddressOfPlane(src, 0);
+        const uint8_t *srcUV = CVPixelBufferGetBaseAddressOfPlane(src, 1);
+        uint8_t *dstY = CVPixelBufferGetBaseAddressOfPlane(dst, 0);
+        uint8_t *dstUV = CVPixelBufferGetBaseAddressOfPlane(dst, 1);
+        if (!srcY || !srcUV || !dstY || !dstUV) {
+            CVPixelBufferUnlockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
+            CVPixelBufferUnlockBaseAddress(dst, 0);
+            atomic_fetch_add(&g_inplaceLockFail, 1);
+            CVPixelBufferRelease(src);
+            atomic_fetch_add(&g_inplaceMismatch, 1);
+            return NO;
+        }
 
         if (dw == sw && dh == sh) {
             // Same-size: stride-aware direkte Kopie (beide Planes)
