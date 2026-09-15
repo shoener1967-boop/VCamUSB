@@ -1511,8 +1511,9 @@ static void dumpOrientationAttachments(CMSampleBufferRef sb) {
             NSDictionary *d = (__bridge NSDictionary *)att0;
             for (NSString *k in d) {
                 id v = d[k];
+                NSString *vs = [v description];
                 off += snprintf(buf + off, sizeof(g_orientDump) - off,
-                    "%s=%s; ", [k UTF8String], [[v description] UTF8String]);
+                    "%s=%s; ", [k UTF8String], [vs UTF8String]);
             }
         }
     }
@@ -1524,20 +1525,23 @@ static void dumpOrientationAttachments(CMSampleBufferRef sb) {
             CFDictionaryRef cleanAperture = CFDictionaryGetValue(
                 ext, kCMFormatDescriptionExtension_CleanAperture);
             if (cleanAperture) {
+                NSString *s = [(__bridge NSDictionary *)cleanAperture description];
                 off += snprintf(buf + off, sizeof(g_orientDump) - off,
-                    "CleanAperture=%@; ", (__bridge NSDictionary *)cleanAperture);
+                    "CleanAperture=%s; ", [s UTF8String]);
             }
             CFDictionaryRef par = CFDictionaryGetValue(
                 ext, kCMFormatDescriptionExtension_PixelAspectRatio);
             if (par) {
+                NSString *s = [(__bridge NSDictionary *)par description];
                 off += snprintf(buf + off, sizeof(g_orientDump) - off,
-                    "PixelAspectRatio=%@; ", (__bridge NSDictionary *)par);
+                    "PixelAspectRatio=%s; ", [s UTF8String]);
             }
             NSNumber *rot = (__bridge NSNumber *)CFDictionaryGetValue(
                 ext, @"Rotation");
             if (rot) {
+                NSString *s = [rot stringValue];
                 off += snprintf(buf + off, sizeof(g_orientDump) - off,
-                    "Rotation=%@; ", rot);
+                    "Rotation=%s; ", [s UTF8String]);
             }
         }
     }
