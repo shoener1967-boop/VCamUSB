@@ -930,6 +930,19 @@ static void statusServerThread(void) {
             (unsigned long long)atomic_load(&g_passthroughFailures),
             (unsigned long long)atomic_load(&g_passthroughOrig));
         if (fw > 0) w += fw;
+        // Sink-Beobachtung (Preview/Recording/Foto-Pfade)
+        fw = snprintf(msg + w, sizeof(msg) - w,
+            " SINK iq=%llu iqFmt=%lldx%lld fmt=0x%08llx surf=%lld | qt=%llu qtFmt=%lldx%lld fmt=0x%08llx surf=%lld | st=%llu stFmt=%lldx%lld fmt=0x%08llx surf=%lld\n",
+            (unsigned long long)atomic_load(&g_iqCalls),
+            (long long)atomic_load(&g_iqWidth), (long long)atomic_load(&g_iqHeight),
+            (unsigned)(long long)atomic_load(&g_iqFmt), (long long)atomic_load(&g_iqSurf),
+            (unsigned long long)atomic_load(&g_qtCalls),
+            (long long)atomic_load(&g_qtWidth), (long long)atomic_load(&g_qtHeight),
+            (unsigned)(long long)atomic_load(&g_qtFmt), (long long)atomic_load(&g_qtSurf),
+            (unsigned long long)atomic_load(&g_stCalls),
+            (long long)atomic_load(&g_stWidth), (long long)atomic_load(&g_stHeight),
+            (unsigned)(long long)atomic_load(&g_stFmt), (long long)atomic_load(&g_stSurf));
+        if (fw > 0) w += fw;
         if (atomic_load(&g_fmtDumped)) {
             int mw = snprintf(msg + w, sizeof(msg) - w, " MIS dst=0x%08x %lldx%lld src=0x%08x %lldx%lld\n",
                 (unsigned)(long long)atomic_load(&g_misDstFmt),
@@ -1331,6 +1344,60 @@ static void dumpWildcardClasses(void) {
     memcpy(g_sinkClasses, tmp, sizeof(tmp));
     L("Sink-Klassen-Diagnose fertig (%d gematcht)", classCount);
 }
+
+// ---------------------------------------------------------------- Sink-Beobachtung (Astra: Video-/Recording-/Foto-Pfade)
+// Aus syslog_full.txt verifizierte echte Sink-Klassen in mediaserverd:
+//   BWImageQueueSinkNode           -> renderSampleBuffer:forInput:  (PREVIEW, "Did display first frame")
+//   BWQuickTimeMovieFileSinkNode   -> Recording-Pfad
+//   BWStillImageSampleBufferSinkNode -> Foto-Pfad
+static _Atomic uint64_t g_iqCalls = 0;
+static _Atomic uint64_t g_iqWithImage = 0;
+static _Atomic int64_t g_iqWidth = 0, g_iqHeight = 0, g_iqFmt = 0, g_iqSurf = 0;
+static _Atomic uint64_t g_qtCalls = 0;
+static _Atomic int64_t g_qtWidth = 0, g_qtHeight = 0, g_qtFmt = 0, g_qtSurf = 0;
+static _Atomic uint64_t g_stCalls = 0;
+static _Atomic int64_t g_stWidth = 0, g_stHeight = 0, g_stFmt = 0, g_stSurf = 0;
+
+static void measureSinkAtomic(_Atomic uint64_t *calls, _Atomic int64_t *w,
+                              _Atomic int64_t *h, _Atomic int64_t *fmt,
+                              _Atomic int64_t *surf, CMSampleBufferRef sb) {
+    atomic_fetch_add(calls, 1);
+    if (!sb) return;
+    CVPixelBufferRef px = CMSampleBufferGetImageBuffer(sb);
+    if (!px) return;
+    atomic_store(w, (int64_t)CVPixelBufferGetWidth(px));
+    atomic_store(h, (int64_t)CVPixelBufferGetHeight(px));
+    atomic_store(fmt, (int64_t)CVPixelBufferGetPixelFormatType(px));
+    IOSurfaceRef s = CVPixelBufferGetIOSurface(px);
+    atomic_store(surf, s ? (int64_t)IOSurfaceGetID(s) : -1);
+}
+
+// ---- BWImageQueueSinkNode (PREVIEW-Pfad!) ----
+%hook BWImageQueueSinkNode
+- (void)renderSampleBuffer:(id)sampleBuffer forInput:(id)input {
+    measureSinkAtomic(&g_iqCalls, &g_iqWidth, &g_iqHeight, &g_iqFmt, &g_iqSurf,
+                      (__bridge CMSampleBufferRef)sampleBuffer);
+    %orig;
+}
+%end
+
+// ---- BWQuickTimeMovieFileSinkNode (Recording-Pfad) ----
+%hook BWQuickTimeMovieFileSinkNode
+- (void)renderSampleBuffer:(id)sampleBuffer forInput:(id)input {
+    measureSinkAtomic(&g_qtCalls, &g_qtWidth, &g_qtHeight, &g_qtFmt, &g_qtSurf,
+                      (__bridge CMSampleBufferRef)sampleBuffer);
+    %orig;
+}
+%end
+
+// ---- BWStillImageSampleBufferSinkNode (Foto-Pfad) ----
+%hook BWStillImageSampleBufferSinkNode
+- (void)renderSampleBuffer:(id)sampleBuffer forInput:(id)input {
+    measureSinkAtomic(&g_stCalls, &g_stWidth, &g_stHeight, &g_stFmt, &g_stSurf,
+                      (__bridge CMSampleBufferRef)sampleBuffer);
+    %orig;
+}
+%end
 
 // ---------------------------------------------------------------- ctor
 %ctor {
