@@ -1,7 +1,7 @@
 // VCamInject — Frame-Swap in mediaserverd (Dopamine2-roothide)
 //
 // ---------------------------------------------------------------- Build-ID für Artefakt-Identifikation
-#define VCAM_BUILD_ID "stage-iso-2026-09-15-01"
+#define VCAM_BUILD_ID "p420-preview-2026-09-15-01"
 
 // Pipeline: WS-Client (8767) → NAL-Queue → H.264-Decode (VideoToolbox, AVCC)
 //           → CVPixelBuffer → buildSwapSampleBuffer → FigCapture-Hook
@@ -95,6 +95,7 @@ static _Atomic int g_stage = 0;
 //   BWStillImageSampleBufferSinkNode -> Foto-Pfad
 static _Atomic uint64_t g_iqCalls = 0;
 static _Atomic uint64_t g_iqWithImage = 0;
+static _Atomic uint64_t g_iqSwaps = 0;
 static _Atomic int64_t g_iqWidth = 0, g_iqHeight = 0, g_iqFmt = 0, g_iqSurf = 0;
 static _Atomic uint64_t g_qtCalls = 0;
 static _Atomic int64_t g_qtWidth = 0, g_qtHeight = 0, g_qtFmt = 0, g_qtSurf = 0;
@@ -413,10 +414,48 @@ static BOOL swapPixelsInPlace(CMSampleBufferRef original) {
         atomic_store(&g_misSrcH, (int64_t)sh);
     }
 
-    // Nur NV12/420f biplanar unterstützen wir aktuell
-    BOOL isNV12 = (dfmt == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
-                || dfmt == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
-    if (isNV12 && dfmt == sfmt) {
+    // Nur NV12/420f/p420 biplanar unterstützen wir aktuell.
+    // p420 wird als biplanarer 4:2:0-Kandidat akzeptiert, aber das Layout wird
+    // ZUR LAUFZEIT pro Buffer verifiziert (PlaneCount, Strides, Plane-Höhen).
+    // Quelle und Ziel müssen NICHT identisch sein (Decoder liefert 420f,
+    // Preview-Sink nutzt p420) — beide müssen nur biplanar-420 sein.
+    BOOL dst420 = (dfmt == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+                || dfmt == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+                || dfmt == 0x70343230);   // 'p420' (big-endian FourCC)
+    BOOL src420 = (sfmt == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+                || sfmt == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+                || sfmt == 0x70343230);
+
+    // Layout-Verifikation: beide Buffer müssen biplanar sein (2 Planes,
+    // Y volle Höhe, UV halbe Höhe). Sonst Original durchlassen.
+    BOOL layoutOK = NO;
+    if (dst420 && src420) {
+        size_t dstPlanes = CVPixelBufferGetPlaneCount(dst);
+        size_t srcPlanes = CVPixelBufferGetPlaneCount(src);
+        if (dstPlanes == 2 && srcPlanes == 2) {
+            size_t dYH = CVPixelBufferGetHeightOfPlane(dst, 0);
+            size_t dUVH = CVPixelBufferGetHeightOfPlane(dst, 1);
+            size_t sYH = CVPixelBufferGetHeightOfPlane(src, 0);
+            size_t sUVH = CVPixelBufferGetHeightOfPlane(src, 1);
+            layoutOK = (dYH == dh && sYH == sh &&
+                        dUVH == (dh + 1) / 2 && sUVH == (sh + 1) / 2);
+            if (!layoutOK) {
+                // Einmalig pro Format loggen (Diagnose)
+                static _Atomic int64_t g_layoutDump = 0;
+                if (!atomic_load(&g_layoutDump)) {
+                    atomic_store(&g_layoutDump, 1);
+                    L("LAYOUT-MISMATCH dst(planes=%zu Y=%zu/%zu UV=%zu/%zu stride=%zu/%zu) src(planes=%zu Y=%zu/%zu UV=%zu/%zu stride=%zu/%zu) fmt=0x%08x",
+                      dstPlanes, dYH, CVPixelBufferGetBytesPerRowOfPlane(dst, 0),
+                      dUVH, CVPixelBufferGetBytesPerRowOfPlane(dst, 1),
+                      srcPlanes, sYH, CVPixelBufferGetBytesPerRowOfPlane(src, 0),
+                      sUVH, CVPixelBufferGetBytesPerRowOfPlane(src, 1),
+                      (unsigned)dfmt);
+                }
+            }
+        }
+    }
+
+    if (dst420 && src420 && layoutOK) {
         CVPixelBufferLockBaseAddress(dst, 0);
         CVPixelBufferLockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
 
@@ -945,8 +984,9 @@ static void statusServerThread(void) {
         if (fw > 0) w += fw;
         // Sink-Beobachtung (Preview/Recording/Foto-Pfade)
         fw = snprintf(msg + w, sizeof(msg) - w,
-            " SINK iq=%llu iqFmt=%lldx%lld fmt=0x%08llx surf=%lld | qt=%llu qtFmt=%lldx%lld fmt=0x%08llx surf=%lld | st=%llu stFmt=%lldx%lld fmt=0x%08llx surf=%lld\n",
+            " SINK iq=%llu iqSwaps=%llu iqFmt=%lldx%lld fmt=0x%08llx surf=%lld | qt=%llu qtFmt=%lldx%lld fmt=0x%08llx surf=%lld | st=%llu stFmt=%lldx%lld fmt=0x%08llx surf=%lld\n",
             (unsigned long long)atomic_load(&g_iqCalls),
+            (unsigned long long)atomic_load(&g_iqSwaps),
             (long long)atomic_load(&g_iqWidth), (long long)atomic_load(&g_iqHeight),
             (unsigned long long)atomic_load(&g_iqFmt), (long long)atomic_load(&g_iqSurf),
             (unsigned long long)atomic_load(&g_qtCalls),
@@ -1376,15 +1416,29 @@ static void measureSinkAtomic(_Atomic uint64_t *calls, _Atomic int64_t *w,
 }
 
 // ---- BWImageQueueSinkNode (PREVIEW-Pfad!) ----
+// Beobachtung immer; Replacement NUR in stage 3 (und nur wenn kein
+// Foto/Recording läuft). Der Preview-Sink nutzt p420 — swapPixelsInPlace
+// verifiziert das Layout zur Laufzeit.
 %hook BWImageQueueSinkNode
 - (void)renderSampleBuffer:(id)sampleBuffer forInput:(id)input {
     measureSinkAtomic(&g_iqCalls, &g_iqWidth, &g_iqHeight, &g_iqFmt, &g_iqSurf,
                       (__bridge CMSampleBufferRef)sampleBuffer);
+    if (atomic_load(&g_stage) >= 3 && atomic_load(&g_replacementEnabled) &&
+        !atomic_load(&g_photoInProgress) && !atomic_load(&g_recordingInProgress)) {
+        CMSampleBufferRef sb = (__bridge CMSampleBufferRef)sampleBuffer;
+        if (swapPixelsInPlace(sb)) {
+            atomic_fetch_add(&g_iqSwaps, 1);
+            %orig;
+            return;
+        }
+    }
     %orig;
 }
 %end
 
 // ---- BWQuickTimeMovieFileSinkNode (Recording-Pfad) ----
+// NUR Beobachtung (Astra: fmt=0 deutet auf anderen Handoff — Replacement
+// bleibt deaktiviert, bis der echte Movie-Bildpfad identifiziert ist).
 %hook BWQuickTimeMovieFileSinkNode
 - (void)renderSampleBuffer:(id)sampleBuffer forInput:(id)input {
     measureSinkAtomic(&g_qtCalls, &g_qtWidth, &g_qtHeight, &g_qtFmt, &g_qtSurf,
@@ -1394,6 +1448,8 @@ static void measureSinkAtomic(_Atomic uint64_t *calls, _Atomic int64_t *w,
 %end
 
 // ---- BWStillImageSampleBufferSinkNode (Foto-Pfad) ----
+// NUR Beobachtung (Astra: 4032x3024 Still-/Sensorpfad — NICHT mit
+// Preview-Logik überschreiben, bis der Still-Pfad separat verstanden ist).
 %hook BWStillImageSampleBufferSinkNode
 - (void)renderSampleBuffer:(id)sampleBuffer forInput:(id)input {
     measureSinkAtomic(&g_stCalls, &g_stWidth, &g_stHeight, &g_stFmt, &g_stSurf,
